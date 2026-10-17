@@ -94,6 +94,8 @@ What to look at:
 3. Search Northwind for *Orchid Freight* (champion left, competitor evaluation, sparse telemetry) and *Summit Dental Group* (budget cut + support issue): live at-risk accounts.
 4. **Agent runs**: each run's steps, timings, counts, claims removed. **Model**: the evaluation above. **Data quality**: duplicates, late data, identity matching, review queue.
 
+API docs: Swagger UI at http://localhost:8000/api/docs (ReDoc at `/api/redoc`). Every `/api` call is recorded in `api_requests` (endpoint, route, redacted headers, status, latency, caller); managers can query it at `/api/audit/requests` and `/api/audit/summary`.
+
 CLI (`cd backend && python -m triage --help`): `generate`, `ingest`, `train`, `run`, `backfill`, `seed-users`, `serve`, `migrate`, `reset-db`.
 
 Without an OpenAI key, briefs come from a deterministic template writer: same facts, same validation. With a key, `gpt-4o-mini` writes them and the validator strips anything it can't support.

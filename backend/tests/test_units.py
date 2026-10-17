@@ -87,3 +87,10 @@ def test_grounding_drops_unsupported_claims_and_internal_language():
     assert out["email"] is None                                   # leaked internal language
     assert {d["reason"] for d in dropped} >= {"number not supported by cited facts", "no valid citation",
                                               "email leaked internal risk language"}
+
+
+def test_audit_redacts_sensitive_headers():
+    from triage.api.audit import redact_headers
+    out = redact_headers({"Authorization": "Bearer secret-token", "Cookie": "s=1", "User-Agent": "curl/8"})
+    assert out["authorization"].startswith("Bearer <redacted:") and "secret-token" not in out["authorization"]
+    assert out["cookie"] == "<redacted>" and out["user-agent"] == "curl/8"

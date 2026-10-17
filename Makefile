@@ -1,7 +1,7 @@
 PY ?= .venv/bin/python
 TRIAGE = cd backend && ../$(PY) -m triage
 
-.PHONY: setup db demo generate ingest train backfill run users api web test reset
+.PHONY: migrate setup db demo generate ingest train backfill run users api web test reset
 
 setup:            ## create venv + install backend and frontend deps
 	python3.12 -m venv .venv && .venv/bin/pip install -q -r backend/requirements.txt
@@ -9,6 +9,9 @@ setup:            ## create venv + install backend and frontend deps
 
 db:               ## start Postgres in Docker
 	docker compose up -d --wait db
+
+migrate:          ## apply any new SQL migrations (keeps data)
+	$(TRIAGE) migrate
 
 reset:            ## drop and recreate the schema
 	$(TRIAGE) reset-db --yes

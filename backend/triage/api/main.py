@@ -21,19 +21,45 @@ from pydantic import BaseModel
 from ..config import settings
 from ..db import system_tx, tenant_tx
 from ..features.build import FEATURES
+from .audit import audit_middleware, start_writer, stop_writer
 from .auth import User, current_user, login
 
 log = logging.getLogger("triage.api")
-app = FastAPI(title="Triage", version="1.0")
+
+TAGS = [
+    {"name": "auth", "description": "Sign in. Returns a JWT; send it as `Authorization: Bearer <token>`. "
+                                     "Use the **Authorize** button above with a token from `POST /api/auth/login`."},
+    {"name": "call list", "description": "The weekly ranked call list for a CSM (or the whole team for a manager)."},
+    {"name": "accounts", "description": "Account detail, score drivers, brief, draft, timeline and the raw "
+                                        "evidence behind every feature value."},
+    {"name": "outreach", "description": "Approve or reject drafted customer emails. Nothing is ever sent by Triage."},
+    {"name": "agent & model", "description": "Unattended agent runs and the active model card."},
+    {"name": "data quality", "description": "Ingestion, de-duplication, identity matching and coverage."},
+    {"name": "observability", "description": "Health check and the API request audit log."},
+]
+
+app = FastAPI(
+    title="Triage API",
+    version="1.0",
+    description=(
+        "Ranks each CSM's accounts by churn risk, revenue and renewal urgency, explains why, and drafts "
+        "outreach for human approval.\n\n"
+        "**Tenancy:** the tenant comes from your token; every query is filtered by Postgres row-level "
+        "security.\n\n**Demo login:** `manager@northwind.example` / `triage-demo`."),
+    openapi_tags=TAGS,
+    docs_url="/api/docs", redoc_url="/api/redoc", openapi_url="/api/openapi.json",
+)
+app.middleware("http")(audit_middleware)
 
 
-@app.middleware("http")
-async def access_log(request: Request, call_next):
-    t0 = time.time()
-    resp = await call_next(request)
-    if request.url.path.startswith("/api"):
-        log.info("%s %s %s %.0fms", request.method, request.url.path, resp.status_code, (time.time() - t0) * 1000)
-    return resp
+@app.on_event("startup")
+def _start_audit_writer():
+    start_writer()
+
+
+@app.on_event("shutdown")
+def _stop_audit_writer():
+    stop_writer()
 
 
 # ----------------------------------------------------------------- helpers
@@ -80,13 +106,16 @@ class LoginIn(BaseModel):
     email: str
     password: str
 
+    model_config = {"json_schema_extra": {"examples": [{"email": "manager@northwind.example",
+                                                         "password": "triage-demo"}]}}
 
-@app.post("/api/auth/login")
+
+@app.post("/api/auth/login", tags=["auth"], summary="Sign in and get a bearer token")
 def api_login(body: LoginIn):
     return login(body.email, body.password)
 
 
-@app.get("/api/health")
+@app.get("/api/health", tags=["observability"], summary="Liveness: database, active model, last run per tenant")
 def health():
     with system_tx() as conn:
         conn.execute("SELECT 1")
@@ -97,7 +126,7 @@ def health():
 
 
 # ---------------------------------------------------------------- the app
-@app.get("/api/me")
+@app.get("/api/me", tags=["auth"], summary="Current user, tenant and (for managers) the CSM list")
 def me(user: User = Depends(current_user)):
     with tenant_tx(user.tenant_id) as conn:
         t = conn.execute("SELECT tenant_id, name, timezone, csm_weekly_capacity FROM tenants").fetchone()
@@ -106,7 +135,7 @@ def me(user: User = Depends(current_user)):
     return {"user": user.__dict__, "tenant": t, "csms": csms}
 
 
-@app.get("/api/calllist")
+@app.get("/api/calllist", tags=["call list"], summary="Ranked call list from the latest successful run")
 def calllist(owner: str | None = None, run_id: str | None = None, user: User = Depends(current_user)):
     owner = _owner_scope(user, owner)
     with tenant_tx(user.tenant_id) as conn:
@@ -148,7 +177,7 @@ def calllist(owner: str | None = None, run_id: str | None = None, user: User = D
             "expected_arr_at_risk": round(arr_at_risk, 2), "call": call, "watch": watch, "unknown": unknown}
 
 
-@app.get("/api/team")
+@app.get("/api/team", tags=["call list"], summary="Per-CSM summary (managers only)")
 def team(user: User = Depends(current_user)):
     if user.role != "manager":
         raise HTTPException(403, "managers only")
@@ -167,7 +196,7 @@ def team(user: User = Depends(current_user)):
     return {"run": _run_meta(run), "csms": rows}
 
 
-@app.get("/api/accounts/{account_id}")
+@app.get("/api/accounts/{account_id}", tags=["accounts"], summary="Account detail: score, drivers, brief, draft, timeline")
 def account(account_id: str, run_id: str | None = None, user: User = Depends(current_user)):
     with tenant_tx(user.tenant_id) as conn:
         a = conn.execute("""SELECT a.*, u.name AS owner_name FROM accounts a
@@ -247,7 +276,7 @@ FEATURE_SOURCES = {
 }
 
 
-@app.get("/api/accounts/{account_id}/evidence")
+@app.get("/api/accounts/{account_id}/evidence", tags=["accounts"], summary="Raw source rows behind one feature value")
 def evidence(account_id: str, feature: str, run_id: str | None = None, user: User = Depends(current_user)):
     """The raw rows behind one feature value, as the run saw them.
 
@@ -336,26 +365,26 @@ def _decide(draft_id: str, status: str, body: DraftDecision, user: User):
         return conn.execute("SELECT * FROM outreach_drafts WHERE draft_id=%s", (draft_id,)).fetchone()
 
 
-@app.post("/api/drafts/{draft_id}/approve")
+@app.post("/api/drafts/{draft_id}/approve", tags=["outreach"], summary="Approve a pending draft (optionally with edits)")
 def approve(draft_id: uuid.UUID, body: DraftDecision, user: User = Depends(current_user)):
     """Approval marks the draft ready for the CSM to send from their own mailbox.
     v1 deliberately has no send path: a human always presses send."""
     return _decide(str(draft_id), "approved", body, user)
 
 
-@app.post("/api/drafts/{draft_id}/reject")
+@app.post("/api/drafts/{draft_id}/reject", tags=["outreach"], summary="Reject a pending draft")
 def reject(draft_id: uuid.UUID, body: DraftDecision, user: User = Depends(current_user)):
     return _decide(str(draft_id), "rejected", body, user)
 
 
-@app.get("/api/runs")
+@app.get("/api/runs", tags=["agent & model"], summary="Last 50 agent runs with steps, timings and stats")
 def runs(user: User = Depends(current_user)):
     with tenant_tx(user.tenant_id) as conn:
         return conn.execute("""SELECT run_id, as_of, trigger, status, started_at, finished_at, model_version,
                                       steps, stats, error FROM agent_runs ORDER BY started_at DESC LIMIT 50""").fetchall()
 
 
-@app.get("/api/model")
+@app.get("/api/model", tags=["agent & model"], summary="Active model card and evaluation (this tenant's slice)")
 def model_card(user: User = Depends(current_user)):
     with system_tx() as conn:
         m = conn.execute("""SELECT model_version, created_at, algorithm, feature_version, features, train_window, metrics
@@ -375,7 +404,7 @@ def model_card(user: User = Depends(current_user)):
     return m
 
 
-@app.get("/api/data-quality")
+@app.get("/api/data-quality", tags=["data quality"], summary="Ingestion, duplicates, late data, identity matching, coverage")
 def data_quality(user: User = Depends(current_user)):
     with tenant_tx(user.tenant_id) as conn:
         landing = conn.execute("""
@@ -416,6 +445,45 @@ def data_quality(user: User = Depends(current_user)):
     return {"landing": landing, "semantic_dedup": normalized, "late_arrivals": late, "product_schema_versions": schema,
             "identity": identity, "review_queue": review, "rejected_samples": rejected,
             "stale_crm_renewal_dates": stale["n"], "coverage": blind}
+
+
+@app.get("/api/audit/requests", tags=["observability"],
+         summary="API request audit log for this tenant (managers only)")
+def audit_requests(status: int | None = None, route: str | None = None, errors_only: bool = False,
+                   limit: int = 100, user: User = Depends(current_user)):
+    """Most recent requests first: endpoint, route template, status, latency, caller and
+    (redacted) headers. Filter by exact `status`, by `route` substring, or `errors_only` (>= 400)."""
+    if user.role != "manager":
+        raise HTTPException(403, "managers only")
+    with tenant_tx(user.tenant_id) as conn:
+        return conn.execute("""
+            SELECT request_id, at, method, path, route, query, status, latency_ms, response_bytes,
+                   user_email, role, client_ip, user_agent, request_headers, response_headers, error
+            FROM api_requests
+            WHERE (%(s)s::int IS NULL OR status = %(s)s)
+              AND (%(r)s::text IS NULL OR route ILIKE '%%' || %(r)s || '%%')
+              AND (NOT %(e)s OR status >= 400)
+            ORDER BY at DESC LIMIT %(l)s""",
+                            {"s": status, "r": route, "e": errors_only, "l": min(max(limit, 1), 1000)}).fetchall()
+
+
+@app.get("/api/audit/summary", tags=["observability"],
+         summary="Per-endpoint traffic, error rate and latency percentiles (managers only)")
+def audit_summary(hours: int = 24, user: User = Depends(current_user)):
+    """Grouped by route template over the last `hours`: request count, 4xx/5xx counts,
+    and p50 / p95 / max latency in milliseconds."""
+    if user.role != "manager":
+        raise HTTPException(403, "managers only")
+    with tenant_tx(user.tenant_id) as conn:
+        return conn.execute("""
+            SELECT method, COALESCE(route, path) AS route, count(*) AS requests,
+                   count(*) FILTER (WHERE status BETWEEN 400 AND 499) AS client_errors,
+                   count(*) FILTER (WHERE status >= 500) AS server_errors,
+                   round(percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms)::numeric, 1) AS p50_ms,
+                   round(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)::numeric, 1) AS p95_ms,
+                   round(max(latency_ms)::numeric, 1) AS max_ms
+            FROM api_requests WHERE at > now() - make_interval(hours => %s)
+            GROUP BY 1, 2 ORDER BY requests DESC""", (min(max(hours, 1), 24 * 30),)).fetchall()
 
 
 # --------------------------------------------------------- SPA static files
