@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api, fmtDate, fmtMoney, fmtPct, renewalText } from "./api";
-import { Band, Drivers, EvidenceDrawer, Sparkline } from "./components";
+import { Band, BandLegend, Drivers, EvidenceDrawer, Sparkline } from "./components";
 import { useMe } from "./ctx";
 
 function useLoad<T>(path: string | null) {
@@ -90,25 +90,27 @@ export function CallListPage() {
       {data && (
         <>
           <div className="tally">
-            <div><strong>{data.counts.call ?? 0}</strong><span>to call this week</span></div>
-            <div><strong>{data.counts.watch ?? 0}</strong><span>to watch</span></div>
-            <div><strong>{data.counts.unknown ?? 0}</strong><span>we can't see</span></div>
+            <div className="t-call"><strong>{data.counts.call ?? 0}</strong><span>red: call this week</span></div>
+            <div className="t-watch"><strong>{data.counts.watch ?? 0}</strong><span>amber: watch</span></div>
+            <div className="t-healthy"><strong>{data.counts.healthy ?? 0}</strong><span>green: healthy</span></div>
+            <div className="t-unknown"><strong>{data.counts.unknown ?? 0}</strong><span>grey: can't see</span></div>
             <div><strong>{data.accounts_in_book}</strong><span>accounts {isTeam ? "across the team" : "in the book"}</span></div>
             <div><strong>{fmtMoney(data.expected_arr_at_risk)}</strong><span>expected ARR at risk</span></div>
           </div>
+          <BandLegend />
           <section className="board">
-            <div className="board-head"><h2>Call this week</h2><span className="small muted">capacity {me.tenant.csm_weekly_capacity} per CSM</span></div>
+            <div className="board-head"><h2><i className="swatch call" />Red: call this week</h2><span className="small muted">capacity {me.tenant.csm_weekly_capacity} per CSM</span></div>
             {data.call.length === 0 && <p className="empty">Nothing needs a call this week. The watch list below is the place to look next.</p>}
             {data.call.map((r: any) => <AccountRow key={r.account_id} r={r} showOwner={isTeam} />)}
           </section>
           {data.unknown.length > 0 && (
             <section className="board">
-              <div className="board-head"><h2>Can't see: renewing within 120 days</h2><span className="small muted">no data is not good news</span></div>
+              <div className="board-head"><h2><i className="swatch unknown" />Grey: can't see, renewing within 120 days</h2><span className="small muted">no data is not good news</span></div>
               {data.unknown.map((r: any) => <AccountRow key={r.account_id} r={r} showOwner={isTeam} />)}
             </section>
           )}
           <section className="board">
-            <div className="board-head"><h2>Watch</h2><span className="small muted">elevated risk, not urgent yet</span></div>
+            <div className="board-head"><h2><i className="swatch watch" />Amber: watch</h2><span className="small muted">elevated risk, not urgent yet</span></div>
             {data.watch.length === 0 && <p className="empty">No accounts on watch.</p>}
             {data.watch.map((r: any) => <AccountRow key={r.account_id} r={r} showOwner={isTeam} />)}
           </section>
@@ -301,7 +303,7 @@ export function TeamPage() {
       {data && (
         <div className="board table-wrap">
           <table className="data">
-            <thead><tr><th>CSM</th><th>Accounts</th><th>Call</th><th>Watch</th><th>Can't see</th><th>Expected ARR at risk</th><th>Drafts approved</th><th>Drafts waiting</th></tr></thead>
+            <thead><tr><th>CSM</th><th>Accounts</th><th>Red</th><th>Amber</th><th>Grey</th><th>Expected ARR at risk</th><th>Drafts approved</th><th>Drafts waiting</th></tr></thead>
             <tbody>
               {data.csms.map((c: any) => (
                 <tr key={c.owner_id}>
@@ -330,7 +332,7 @@ export function RunsPage() {
       {data && (
         <div className="board table-wrap">
           <table className="data">
-            <thead><tr><th>Scored for</th><th>Trigger</th><th>Status</th><th>Took</th><th>Records ingested</th><th>Accounts</th><th>Call / watch / can't see</th><th>Briefs</th><th>Claims removed</th><th></th></tr></thead>
+            <thead><tr><th>Scored for</th><th>Trigger</th><th>Status</th><th>Took</th><th>Records ingested</th><th>Accounts</th><th>Red / amber / grey</th><th>Briefs</th><th>Claims removed</th><th></th></tr></thead>
             <tbody>
               {data.map((r) => {
                 const st = r.stats || {};

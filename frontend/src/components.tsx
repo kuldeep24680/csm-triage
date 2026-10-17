@@ -20,8 +20,25 @@ export function Sparkline({ points, width = 120, height = 28 }: { points: { p: n
   );
 }
 
+// Red / amber / green, as the VP asked, but derived from calibrated risk and CSM capacity,
+// plus grey for "not enough data" so a silent account never shows as green.
+export const BAND_LABEL: Record<string, string> = {
+  call: "Red · Call this week", watch: "Amber · Watch", healthy: "Green · Healthy", unknown: "Grey · Can't see",
+};
+
+export function BandLegend() {
+  return (
+    <div className="legend" aria-label="What the colours mean">
+      <span><i className="swatch call" />Red: highest risk × revenue × renewal urgency, up to your weekly capacity</span>
+      <span><i className="swatch watch" />Amber: risk at least 2× average, not this week</span>
+      <span><i className="swatch healthy" />Green: healthy</span>
+      <span><i className="swatch unknown" />Grey: not enough data to score</span>
+    </div>
+  );
+}
+
 export function Band({ band }: { band: string }) {
-  const label: Record<string, string> = { call: "Call this week", watch: "Watch", healthy: "Healthy", unknown: "Can't see" };
+  const label: Record<string, string> = BAND_LABEL;
   return <span className={`band ${band}`}>{label[band] ?? band}</span>;
 }
 
