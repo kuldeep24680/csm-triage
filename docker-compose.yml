@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: triage
       POSTGRES_PASSWORD: triage
       POSTGRES_DB: triage
-    ports: ["5432:5432"]
+    ports: ["${TRIAGE_DB_PORT:-5432}:5432"]   # host:container. Change the host side via TRIAGE_DB_PORT in .env; Postgres inside the container is always 5432
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U triage"]
