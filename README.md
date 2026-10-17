@@ -74,7 +74,7 @@ frontend/src/  main.tsx, pages.tsx, components.tsx, styles.css
 
 ## Run it locally
 
-Needs Python 3.12, Node 18+, Docker.
+Needs Python 3.12, Node 20.19+ (or 22.12+), Docker.
 
 ```bash
 cp .env.example .env            # add OPENAI_API_KEY to use the LLM; optional
