@@ -262,7 +262,9 @@ function DraftPanel({ draft, onDone, canAct }: { draft: any; onDone: () => void;
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   const pending = draft.status === "pending";
-  const mailto = `mailto:${draft.to_email || ""}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  // Gmail's compose URL works in any browser without registering a mailto handler.
+  // It only opens a draft in the CSM's own Gmail; nothing is sent until they press Send.
+  const gmail = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(draft.to_email || "")}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   return (
     <section className="panel draft">
       <h2>Draft email {!pending && <span className={`pill ${draft.status}`}>{draft.status === "approved" ? "Approved" : "Rejected"}</span>}</h2>
@@ -279,7 +281,7 @@ function DraftPanel({ draft, onDone, canAct }: { draft: any; onDone: () => void;
           <button className="btn" disabled={busy} onClick={() => decide("approve")}>Approve draft</button>
           <button className="btn secondary" disabled={busy} onClick={() => decide("reject")}>Reject draft</button>
         </>}
-        {draft.status === "approved" && <a className="btn" href={mailto}>Open in my email</a>}
+        {draft.status === "approved" && <a className="btn" href={gmail} target="_blank" rel="noopener noreferrer">Open in Gmail</a>}
         {!pending && <span className="small muted">{draft.status === "approved" ? "Approved" : "Rejected"} by {draft.decided_by} on {fmtDate(draft.decided_at)}</span>}
       </div>
     </section>

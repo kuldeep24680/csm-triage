@@ -31,7 +31,7 @@ function Login() {
   return (
     <div className="login">
       <form onSubmit={submit}>
-        <div className="brand" style={{ color: "var(--ink)" }}><span className="brand-mark" /> Triage</div>
+        <div className="brand"><span className="brand-mark" /> Triage</div>
         <p className="sub" style={{ marginTop: 8 }}>Who to call this week, and why.</p>
         <label htmlFor="email">Work email</label>
         <input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" required />

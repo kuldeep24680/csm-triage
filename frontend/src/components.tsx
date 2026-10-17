@@ -14,8 +14,8 @@ export function Sparkline({ points, width = 120, height = 28 }: { points: { p: n
   return (
     <svg width={width} height={height} role="img" aria-label={label}>
       <title>{label}</title>
-      <path d={d} fill="none" stroke="var(--ink-3)" strokeWidth="1.5" />
-      <circle cx={last[0]} cy={last[1]} r="3" fill={lastP >= first ? "var(--call)" : "var(--healthy)"} />
+      <path d={d} fill="none" stroke="var(--navy)" strokeOpacity="0.55" strokeWidth="1.5" />
+      <circle cx={last[0]} cy={last[1]} r="3" fill={lastP >= first ? "var(--danger)" : "var(--success)"} />
     </svg>
   );
 }
