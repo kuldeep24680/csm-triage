@@ -46,6 +46,15 @@ The VP asked for *"a health score per account, red / yellow / green, and if an a
 7. **Brief & draft:** the LLM writes call notes and an email using only numbered facts. A validator removes anything unsupported or any internal risk language. Works without an LLM via a template.
 8. **Runs unattended:** a scheduled job does all of the above for each company, with locking, retries and per-company failure isolation.
 
+### Why a nightly run, not real-time
+
+- **The job is weekly prioritisation, not incident response:** CSMs need a good plan each morning, not a live feed.
+- **Churn builds over weeks:** the model flags churners a median of **86 days** before renewal, so same-day freshness wouldn't change the outcome.
+- **Urgent events already have owners:** outages page support (Zendesk); failed payments trigger dunning (Stripe). Triage covers the slower risk nobody owns.
+- **A stable list keeps CSMs focused:** live rescoring would reshuffle the ranked list during the day.
+- **Nightly is the foundation anyway:** webhooks get missed and usage arrives as daily aggregates, so any real-time layer still needs a nightly reconcile.
+- **Ready to extend:** runs are per-company and idempotent. A same-day "interrupt" for critical events (P1 ticket on a large account, cancellation request) can be added on top once there's evidence of same-day misses.
+
 ---
 
 ## 4. Results (held-out last 6 months)
@@ -101,4 +110,4 @@ The VP asked for *"a health score per account, red / yellow / green, and if an a
 ## 8. Not in v1, and what's next
 
 - **Out of scope:** real connectors (the synthetic feeds use the same interface), automatic sending, SSO, per-company models, expansion scoring.
-- **Next:** AWS deployment with a scheduled run, monitoring and alerts, faster feature computation at 10× scale, and regenerating briefs only when facts change.
+- **Next:** AWS deployment with a scheduled nightly run, an optional same-day alert layer for critical events, monitoring and alerts, faster feature computation at 10× scale, and regenerating briefs only when facts change.
