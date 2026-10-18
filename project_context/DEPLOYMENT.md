@@ -207,11 +207,66 @@ docker compose up -d scheduler          # back to 02:00
 
 ---
 
+## Redeploying after a code change
+
+Use this whenever new commits need to go live. It takes about 2–5 minutes, and the site is unavailable for roughly 10–30 seconds while the containers restart. Data is kept: the database and landing files live in Docker volumes, which a rebuild doesn't touch.
+
+**On your Mac:**
+
+```bash
+git push
+```
+
+**On the server:**
+
+```bash
+cd /opt/csm-triage/deploy/docker            # your path may be /opt/csm-triage/csm-triage/deploy/docker
+
+# 1. Back up the database (migrations only go forward)
+docker compose exec -T db pg_dump -U triage triage | gzip > ~/triage-before-$(date +%F-%H%M).sql.gz
+
+# 2. Pull the new code and note what you're deploying
+git pull
+git log --oneline -3
+
+# 3. Check whether the update added new settings
+diff <(grep -o '^[A-Z_]*=' .env.example | sort) <(grep -o '^[A-Z_]*=' .env | sort)
+#    Lines starting with "<" are new settings: copy them from .env.example into .env
+
+# 4. Rebuild and restart (only containers whose image or config changed are recreated)
+docker compose up -d --build
+
+# 5. Verify
+docker compose ps                            # db, api, scheduler (healthy) · caddy Up
+docker compose logs api | tail -5            # "Application startup complete", no errors
+curl -s https://<HOST>/api/health | jq .ok   # true
+```
+
+- **Migrations:** they run automatically when the api starts, and are listed in its log as `applied: [...]`.
+- **What the containers pick up:**
+  - Only `.env` changed: `docker compose up -d` (no `--build`).
+  - Only the `Caddyfile` changed: `docker compose restart caddy`.
+- **No need to re-run `bootstrap`.** A new migration doesn't require it either.
+- **Retraining is optional:** if the change affects the model or its features, run `docker compose exec api python -m triage train`. The next nightly run uses the new model.
+
+**Rolling back** if the new version misbehaves:
+
+```bash
+git log --oneline -5                         # find the last good commit
+git checkout <good-commit>
+docker compose up -d --build
+# If the bad version ran a migration the old code can't handle, restore the backup from step 1:
+gunzip -c ~/triage-before-<timestamp>.sql.gz | docker compose exec -T db psql -U triage -d triage
+git checkout main                            # once the fix is pushed, redeploy as above
+```
+
+---
+
 ## Day-2 operations
 
 | Task | Command (in `/opt/csm-triage/deploy/docker`) |
 |---|---|
-| Deploy a new version | `git -C /opt/csm-triage pull && docker compose up -d --build`. The api applies new migrations on start |
+| Deploy a new version | See [Redeploying after a code change](#redeploying-after-a-code-change) |
 | Status | `docker compose ps` |
 | Logs | `docker compose logs -f api` / `scheduler` (JSON lines with trace_id, user_name, run_id) |
 | A user complains | `GET /api/audit/requests?user_name=<name>` → copy `trace_id` → `docker compose logs api \| grep <trace_id>` |
