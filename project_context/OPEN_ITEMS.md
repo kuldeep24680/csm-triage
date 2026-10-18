@@ -13,7 +13,7 @@ _Last updated: 2026-10-18_
 | 3 | **Production secrets on EC2** | High | `TRIAGE_JWT_SECRET` (random), DB password, `OPENAI_API_KEY`; Slack webhook optional (`deploy/docker/.env`, DEPLOYMENT.md step 1) |
 | 4 | **HTTPS** | High | Caddy container with an `sslip.io` host name or your own domain (`SITE_HOST`, DEPLOYMENT.md step 4) |
 | 5 | **Submission deck (PPT)** | High | Problem reframe → design → model results → agent run → traceability → trade-offs and next steps |
-| 6 | **Walkthrough video** | High | Follow [USER_FLOW.md](../USER_FLOW.md): CSM view → account → evidence → draft approval → manager view → runs and recovery |
+| 6 | **Walkthrough video** | High | Follow [USER_FLOW.md](USER_FLOW.md): CSM view → account → evidence → draft approval → manager view → runs and recovery |
 | 7 | **`git push`** | High | Push the latest commits before sharing the repo |
 | 8 | **Data volume vs brief** | Medium | We generate ~1.2M events; the brief says ~200k. Either explain it in the deck (more history for training) or add a ~200k generator option |
 | 9 | **Incremental identity matching** | Low | Each run re-checks every account (~1s for 3k accounts). Matching only new records would help at larger scale |

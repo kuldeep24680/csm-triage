@@ -8,10 +8,10 @@ This README covers three things: **what I decided**, **what I deliberately skipp
 
 | Document | What's in it |
 |---|---|
-| [`BRIEF.md`](BRIEF.md) | Problem framing and why the original request was reshaped |
-| [`DECISIONS.md`](DECISIONS.md) | Every design decision, with its reason and the alternative rejected |
+| [`BRIEF.md`](project_context/BRIEF.md) | Problem framing and why the original request was reshaped |
+| [`DECISIONS.md`](project_context/DECISIONS.md) | Every design decision, with its reason and the alternative rejected |
 | [`project_context/Triage_Solution_Brief.pptx`](project_context/Triage_Solution_Brief.pptx) | Solution brief deck |
-| [`SETUP.md`](SETUP.md) · [`USER_FLOW.md`](USER_FLOW.md) | Run it locally · walk through it as a CSM |
+| [`SETUP.md`](project_context/SETUP.md) · [`USER_FLOW.md`](project_context/USER_FLOW.md) | Run it locally · walk through it as a CSM |
 | [`project_context/DEPLOYMENT.md`](project_context/DEPLOYMENT.md) | Production deployment (Docker Compose on one server) |
 
 ---
@@ -38,7 +38,7 @@ Weekly replay of the call list across 3 companies, 38 weeks and 167 lost renewal
 
 ## What I decided
 
-The ten decisions that shape the system. All of them, with alternatives, are in [`DECISIONS.md`](DECISIONS.md).
+The ten decisions that shape the system. All of them, with alternatives, are in [`DECISIONS.md`](project_context/DECISIONS.md).
 
 | # | Decision | Why | Instead of |
 |---|---|---|---|
@@ -63,7 +63,7 @@ The ten decisions that shape the system. All of them, with alternatives, are in 
 | **Sending email** | A deliberate product choice (decision 2) | An approved-sender integration, consent rules and templates the business signs off |
 | **Real-time scoring** | Weekly decision; urgent events (outages, failed payments) already have owners | A same-day "interrupt" for critical events, layered on top of the nightly run, which is still needed to reconcile missed webhooks |
 | **Per-company models** | The smallest company has ~100 renewals, too few to fit alone; one shared model with per-company calibration works | A hierarchical model once each company has enough history |
-| **Downgrade / expansion prediction** | The label is "renewal lost"; whether downgrades count is a business question (see BRIEF §7) | A second label and model |
+| **Downgrade / expansion prediction** | The label is "renewal lost"; whether downgrades count is a business question (see project_context/BRIEF.md §7) | A second label and model |
 | **SSO, user management UI** | Seeded logins are enough for a demo; roles (CSM, manager) are enforced | OIDC/SAML login, invite flow |
 | **A review screen for unmatched records** | The queue is shown on the Data quality page, not actionable | Approve/reject UI writing back to the identity links |
 | **Migration framework** (Alembic) | Plain ordered SQL migrations; row-level security policies are SQL anyway | Switch when schema changes need rollbacks |
@@ -141,7 +141,7 @@ deploy/ec2/    systemd alternative without Docker
 
 ## Run it
 
-**Locally** (Python 3.12, Node 20.19+, Docker). Step-by-step: [`SETUP.md`](SETUP.md).
+**Locally** (Python 3.12, Node 20.19+, Docker). Step-by-step: [`SETUP.md`](project_context/SETUP.md).
 
 ```bash
 cp .env.example .env            # optional: add OPENAI_API_KEY
