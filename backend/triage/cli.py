@@ -10,11 +10,18 @@ import typer
 from .config import settings
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, pretty_exceptions_enable=False)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+@app.callback()
+def _init():
+    from .observability import setup
+    setup("triage-agent")
 
 
 def _d(s: str | None) -> date:
-    return date.fromisoformat(s) if s else settings.sim_end_date
+    if s:
+        return date.fromisoformat(s)
+    return date.today() if settings.use_wall_clock else settings.sim_end_date
 
 
 @app.command()
@@ -65,13 +72,29 @@ def train(as_of: str = typer.Option(None), activate: bool = True):
 
 
 @app.command()
-def run(tenant: str = typer.Option(None), as_of: str = typer.Option(None), trigger: str = "manual"):
+def run(tenant: str = typer.Option(None), as_of: str = typer.Option(None), trigger: str = "manual",
+        resume: str = typer.Option(None, help="run_id of a failed/abandoned run to continue from its failed step"),
+        no_retry: bool = typer.Option(False, help="disable the single automatic retry")):
     """One unattended agent run: ingest -> resolve -> features -> score -> diff -> briefs."""
-    from .agent.runner import run_all
-    res = run_all(_d(as_of), tenant=tenant, trigger=trigger)
+    from .agent.runner import resume_run, run_all
+    res = [resume_run(resume)] if resume else run_all(_d(as_of), tenant=tenant, trigger=trigger, auto_retry=not no_retry)
     typer.echo(json.dumps(res, indent=2, default=str))
-    if any(r["status"] == "failed" for r in res):
-        raise typer.Exit(1)   # non-zero exit -> the scheduler marks the run failed and alerts
+    if any(r["status"] in ("failed", "error") for r in res):
+        raise typer.Exit(1)   # non-zero exit -> systemd OnFailure= fires the alert unit
+
+
+@app.command()
+def watchdog(as_of: str = typer.Option(None), stale_minutes: int = 15, no_start: bool = False):
+    """Morning check: abandon stuck runs, alert, and start today's run if it is missing."""
+    from .agent.runner import watchdog as w
+    typer.echo(json.dumps(w(_d(as_of), stale_minutes, start_missing=not no_start), indent=2, default=str))
+
+
+@app.command()
+def alert(message: str):
+    """Send an alert (used by systemd OnFailure= and to test the webhook)."""
+    from .alerts import send
+    send(message)
 
 
 @app.command()

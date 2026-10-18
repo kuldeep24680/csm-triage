@@ -208,3 +208,4 @@ select.picker { padding: 6px 8px; border: 1px solid var(--rule); border-radius: 
 .tally .t-healthy { border-left-color: var(--success); }
 .tally .t-unknown { border-left-color: #b8c2d0; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--ink-2); margin: -8px 0 18px; }
+.pill.failed { background: rgba(220, 38, 38, 0.1); color: #b91c1c; }

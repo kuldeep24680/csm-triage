@@ -322,38 +322,75 @@ export function TeamPage() {
 
 // ----------------------------------------------------------------------- runs
 export function RunsPage() {
-  const { data, err } = useLoad<any[]>("/runs");
+  const me = useMe();
+  const isManager = me.user.role === "manager";
+  const { data, err, reload } = useLoad<any[]>("/runs");
   const [open, setOpen] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const running = (data || []).some((r) => r.status === "running" && !r.stale);
+  // poll while a run is in progress
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(reload, 4000);
+    return () => clearInterval(t);
+  }, [running, reload]);
+  const act = async (path: string, done: string) => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api(path, { method: "POST", body: "{}" });
+      setMsg(done);
+      setTimeout(reload, 800);
+    } catch (e: any) { setMsg(e.message); } finally { setBusy(false); }
+  };
+  const pill = (r: any) => {
+    const status = r.stale ? "stuck" : r.status;
+    const cls = status === "succeeded" ? "approved" : ["failed", "abandoned", "stuck"].includes(status) ? "failed" : status === "running" ? "pending" : "rejected";
+    return <span className={`pill ${cls}`}>{status}</span>;
+  };
   return (
     <>
-      <div className="page-head"><div><h1>Agent runs</h1>
-        <p className="sub">Every run ingests new data, re-scores every account, works out what changed and drafts briefs. No one has to press a button: runs are triggered on a schedule.</p></div></div>
+      <div className="page-head">
+        <div><h1>Agent runs</h1>
+          <p className="sub">Each run ingests new data, re-scores every account, works out what changed and drafts briefs. A failed run is retried automatically once; after that a CS manager can resume it from the step that failed.</p></div>
+        {isManager && (
+          <div style={{ textAlign: "right" }}>
+            <button className="btn" disabled={busy || running} onClick={() => act("/runs", "Run started.")}>{running ? "Run in progress…" : "Run now"}</button>
+            {msg && <div className="small muted" style={{ marginTop: 6 }}>{msg}</div>}
+          </div>
+        )}
+      </div>
       {err && <p className="error">{err}</p>}
       {data && (
         <div className="board table-wrap">
           <table className="data">
-            <thead><tr><th>Scored for</th><th>Trigger</th><th>Status</th><th>Took</th><th>Records ingested</th><th>Accounts</th><th>Red / amber / grey</th><th>Briefs</th><th>Claims removed</th><th></th></tr></thead>
+            <thead><tr><th>Scored for</th><th>Trigger</th><th>Status</th><th>Attempts</th><th>Took</th><th>Accounts</th><th>Red / amber / grey</th><th>Briefs</th><th>Claims removed</th><th></th></tr></thead>
             <tbody>
               {data.map((r) => {
                 const st = r.stats || {};
-                const secs = (r.steps || []).reduce((a: number, s: any) => a + s.seconds, 0);
+                const secs = (r.steps || []).reduce((a: number, s: any) => a + (s.seconds || 0), 0);
+                const canResume = isManager && (r.status === "failed" || r.status === "abandoned");
                 return (
                   <Fragment key={r.run_id}>
                     <tr>
-                      <td>{fmtDate(r.as_of)}</td><td>{r.trigger}</td>
-                      <td><span className={`pill ${r.status === "succeeded" ? "approved" : r.status === "failed" ? "pending" : "rejected"}`}>{r.status}</span></td>
-                      <td>{secs.toFixed(1)}s</td><td>{st.ingest?.inserted ?? 0}</td><td>{st.accounts_scored}</td>
-                      <td>{st.bands?.call ?? 0} / {st.bands?.watch ?? 0} / {st.bands?.unknown ?? 0}</td>
-                      <td>{st.briefs} <span className="muted small">{Object.keys(st.brief_generators || {}).join(", ")}</span></td>
+                      <td>{fmtDate(r.as_of)}</td><td>{r.trigger}</td><td>{pill(r)}</td>
+                      <td>{r.attempts}{r.last_resumed_at ? <span className="small muted"> (resumed)</span> : null}</td>
+                      <td>{secs.toFixed(1)}s</td><td>{st.accounts_scored ?? "–"}</td>
+                      <td>{st.bands ? `${st.bands.call ?? 0} / ${st.bands.watch ?? 0} / ${st.bands.unknown ?? 0}` : "–"}</td>
+                      <td>{st.briefs ?? st.briefs_written ?? "–"} <span className="muted small">{Object.keys(st.brief_generators || {}).join(", ")}</span></td>
                       <td>{st.dropped_claims ?? 0}</td>
-                      <td><button className="btn secondary" onClick={() => setOpen(open === r.run_id ? null : r.run_id)}>{open === r.run_id ? "Hide" : "Steps"}</button></td>
+                      <td style={{ whiteSpace: "nowrap" }}>
+                        {canResume && <button className="btn" disabled={busy || running} onClick={() => act(`/runs/${r.run_id}/resume`, "Resuming from the failed step.")}>Resume</button>}{" "}
+                        <button className="btn secondary" onClick={() => setOpen(open === r.run_id ? null : r.run_id)}>{open === r.run_id ? "Hide" : "Steps"}</button>
+                      </td>
                     </tr>
                     {open === r.run_id && (
-                      <tr key={r.run_id + "-steps"}><td colSpan={10}>
+                      <tr><td colSpan={10}>
                         {r.error && <pre className="error small" style={{ whiteSpace: "pre-wrap" }}>{r.error}</pre>}
                         <table className="data"><tbody>{(r.steps || []).map((s: any) => (
-                          <tr key={s.step}><td>{s.step}</td><td>{s.status}</td><td>{s.seconds}s</td><td>{s.error}</td></tr>))}</tbody></table>
-                        <p className="small muted">run {r.run_id}, model {r.model_version}</p>
+                          <tr key={s.step}><td>{s.step}</td><td>{s.status}{s.reused_on_attempt ? ` (kept from earlier attempt)` : ""}</td><td>{s.seconds}s</td><td>{s.error}</td></tr>))}</tbody></table>
+                        <p className="small muted">run {r.run_id}, model {r.model_version}{r.heartbeat_at ? `, last heartbeat ${new Date(r.heartbeat_at).toLocaleString()}` : ""}</p>
                       </td></tr>
                     )}
                   </Fragment>

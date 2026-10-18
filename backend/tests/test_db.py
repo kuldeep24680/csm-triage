@@ -65,3 +65,15 @@ def test_no_draft_is_ever_sent():
     with tenant_tx(TENANTS[0]) as conn:
         statuses = {r["status"] for r in conn.execute("SELECT DISTINCT status FROM outreach_drafts")}
     assert statuses <= {"pending", "approved", "rejected", "superseded"}
+
+
+def test_only_managers_can_start_or_resume_runs():
+    from fastapi.testclient import TestClient
+    import triage.api.main as m
+    with system_tx() as conn:
+        csm = conn.execute("SELECT email FROM users WHERE role='csm' LIMIT 1").fetchone()["email"]
+    with TestClient(m.app) as c:
+        tok = c.post("/api/auth/login", json={"email": csm, "password": "triage-demo"}).json()["token"]
+        h = {"Authorization": f"Bearer {tok}"}
+        assert c.post("/api/runs", json={}, headers=h).status_code == 403
+        assert c.post("/api/runs/00000000-0000-0000-0000-000000000000/resume", headers=h).status_code == 403

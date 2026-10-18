@@ -28,5 +28,10 @@ class Settings(BaseSettings):
 
     static_dir: Path = REPO_ROOT / "frontend" / "dist"
 
+    # Operations
+    use_wall_clock: bool = False          # production: score "today" (tenant-local); demo: sim_end_date
+    retry_backoff_s: int = 30             # wait before the single automatic retry of a failed run
+    alert_webhook_url: str = ""           # Slack-compatible incoming webhook; empty -> alerts only logged
+
 
 settings = Settings()
