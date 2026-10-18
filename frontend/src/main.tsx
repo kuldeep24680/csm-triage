@@ -27,7 +27,10 @@ function Login() {
       setBusy(false);
     }
   };
-  const demo = (e: string) => { setEmail(e); setPassword("triage-demo"); };
+  // The demo password is only offered outside production; in production the buttons just fill the email.
+  const [demoPw, setDemoPw] = useState<string | null>(null);
+  useEffect(() => { api<{ demo_password: string | null }>("/auth/config").then((c) => setDemoPw(c.demo_password)).catch(() => {}); }, []);
+  const demo = (e: string) => { setEmail(e); if (demoPw) setPassword(demoPw); };
   return (
     <div className="login">
       <form onSubmit={submit}>
@@ -40,7 +43,7 @@ function Login() {
         {err && <p className="error">{err}</p>}
         <div className="actions"><button className="btn" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button></div>
         <div className="demo-logins">
-          Demo accounts (password triage-demo):
+          {demoPw ? `Demo accounts (password ${demoPw}):` : "Demo accounts (ask for the password):"}
           <button type="button" onClick={() => demo("manager@northwind.example")}>Northwind CS manager</button>
           <button type="button" onClick={() => demo("manager@helios.example")}>Helios CS manager</button>
           <button type="button" onClick={() => demo("manager@quill.example")}>Quill CS manager</button>

@@ -38,7 +38,12 @@ services:
   scheduler:
     <<: *app
     command: ["scheduler"]
-    healthcheck: { disable: true }
+    healthcheck:   # database reachable and the job plan computes
+      test: ["CMD", "python", "-m", "triage", "scheduler", "--dry-run"]
+      interval: 5m
+      timeout: 60s
+      start_period: 30s
+    stop_grace_period: 30s
     depends_on:
       api: { condition: service_healthy }   # api has applied migrations first
 

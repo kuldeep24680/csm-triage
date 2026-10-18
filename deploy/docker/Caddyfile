@@ -1,6 +1,23 @@
 # HTTPS with an automatic Let's Encrypt certificate for SITE_HOST.
 # For a plain-HTTP local test, set SITE_HOST=:80
 {$SITE_HOST} {
-	encode gzip
-	reverse_proxy api:8000
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+	# hashed build assets never change: cache them; index.html and the API are not cached
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	reverse_proxy api:8000 {
+		header_down -Server
+	}
+	log {
+		output stdout
+		format json
+	}
 }

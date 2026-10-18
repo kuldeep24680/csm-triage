@@ -158,3 +158,28 @@ def test_scheduler_fires_at_tenant_local_time():
     jobs = plan(now, {"quill": "Asia/Kolkata", "northwind": "America/New_York"})
     assert [j.name for j in jobs] == ["run:quill", "run:northwind", "watchdog"]
     assert jobs[0].argv == ("run", "--tenant", "quill", "--trigger", "schedule")
+
+
+def test_production_refuses_development_secrets():
+    from triage.config import Settings, production_problems
+    assert production_problems(Settings(env="development")) == []
+    bad = production_problems(Settings(env="production", jwt_secret="short",
+                                       database_url="postgresql://triage:triage@localhost/triage"))
+    assert len(bad) == 2
+    good = Settings(env="production", jwt_secret="a" * 64, database_url="postgresql://triage:s3cr3t-value@db:5432/triage")
+    assert production_problems(good) == []
+
+
+def test_login_is_throttled_after_repeated_failures():
+    import pytest
+    from fastapi import HTTPException
+    from triage.api import auth
+    auth._failures.clear()
+    keys = ["email:x@y.example", "ip:203.0.113.5"]
+    for _ in range(auth.LIMITS["email"]):
+        auth._record_failure(keys)
+    assert auth._throttled(keys)
+    with pytest.raises(HTTPException) as e:
+        auth.login("x@y.example", "whatever", "203.0.113.5")
+    assert e.value.status_code == 429
+    auth._failures.clear()

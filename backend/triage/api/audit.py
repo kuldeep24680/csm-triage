@@ -106,17 +106,21 @@ async def audit_middleware(request: Request, call_next):
             "response_headers": json.dumps(redact_headers(resp.headers) if resp is not None else {}),
             "error": error,
         }
-        log.info("%s %s %s %.0fms", request.method, request.url.path, status, ms)
+        (log.debug if request.url.path == "/api/health" else log.info)(
+            "%s %s %s %.0fms", request.method, request.url.path, status, ms)
         attrs = {"method": request.method, "route": route or "unmatched", "status_class": f"{status // 100}xx",
                  "tenant": who["tenant_id"]}
         record("api_requests", 1, **attrs, user_name=who["user_name"])
         record("api_latency", ms, **attrs)
         for var, tok in zip((request_id_var, tenant_var, user_name_var), tokens):
             var.reset(tok)
-        try:
-            _q.put_nowait(rec)
-        except queue.Full:  # never let auditing take the API down
-            log.warning("audit queue full; dropping record %s", request_id)
+        # Container health probes (every 30s) get metrics only, not rows in the audit table.
+        # (No `return` here: a return inside `finally` would replace the response.)
+        if request.url.path != "/api/health":
+            try:
+                _q.put_nowait(rec)
+            except queue.Full:  # never let auditing take the API down
+                log.warning("audit queue full; dropping record %s", request_id)
 
 
 COLS = ["request_id", "at", "tenant_id", "user_id", "user_email", "user_name", "trace_id", "role", "method", "path", "route", "query",

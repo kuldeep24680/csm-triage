@@ -55,12 +55,39 @@ def issue_token(u: dict) -> str:
                       settings.jwt_secret, algorithm="HS256")
 
 
-def login(email: str, password: str) -> dict:
+# Brute-force guard: too many failed logins for one email or from one client -> 429 for a while.
+# In-memory is enough for the single API process this runs as.
+# Per email 10 failures; per client IP 50 (an office shares one IP).
+LIMITS, WINDOW_S = {"email": 10, "ip": 50}, 15 * 60
+_failures: dict[str, list[float]] = {}
+
+
+def _throttled(keys: list[str]) -> bool:
+    import time
+    now = time.time()
+    for k in keys:
+        _failures[k] = [t for t in _failures.get(k, []) if now - t < WINDOW_S]
+    return any(len(_failures[k]) >= LIMITS[k.split(":", 1)[0]] for k in keys)
+
+
+def _record_failure(keys: list[str]) -> None:
+    import time
+    for k in keys:
+        _failures.setdefault(k, []).append(time.time())
+
+
+def login(email: str, password: str, client_ip: str | None = None) -> dict:
+    email = email.lower().strip()
+    keys = [f"email:{email}"] + ([f"ip:{client_ip}"] if client_ip else [])
+    if _throttled(keys):
+        raise HTTPException(429, "too many failed sign-in attempts; try again in 15 minutes")
     # Login is the one place we look a user up before knowing their tenant.
     with system_tx() as conn:
-        u = conn.execute("SELECT * FROM users WHERE email = %s", (email.lower().strip(),)).fetchone()
+        u = conn.execute("SELECT * FROM users WHERE email = %s", (email,)).fetchone()
     if not u or not verify_password(password, u["password_hash"]):
+        _record_failure(keys)
         raise HTTPException(401, "invalid email or password")
+    _failures.pop(f"email:{email}", None)
     return {"token": issue_token(u), "user": {k: u[k] for k in ("user_id", "tenant_id", "email", "name", "role", "crm_user_id")}}
 
 

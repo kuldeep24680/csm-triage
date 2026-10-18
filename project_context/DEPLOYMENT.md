@@ -133,11 +133,27 @@ Afterwards, set it back to `02:00` and run `docker compose up -d scheduler` agai
 | Retrain | `docker compose exec api python -m triage train` (used from the next run) |
 | Backup DB | `docker compose exec -T db pg_dump -U triage triage \| gzip > ~/triage-$(date +%F).sql.gz` |
 | Restore DB | `gunzip -c <file> \| docker compose exec -T db psql -U triage triage` |
+| Changed `Caddyfile` | `docker compose restart caddy` (Caddy doesn't reload the mounted file on its own) |
+| Changed `.env` | `docker compose up -d` (recreates the containers that use it) |
 | Restart everything | `docker compose restart` |
 | Stop (keep data) | `docker compose down` |
 | Wipe everything | `docker compose down -v`. **Deletes the database and data volumes** |
 
 Containers restart automatically (`restart: unless-stopped`), including after a server reboot. Docker starts on boot.
+
+## Production safeguards (already on)
+
+| Safeguard | Detail |
+|---|---|
+| Refuses weak secrets | With `TRIAGE_ENV=production`, the api won't start if `TRIAGE_JWT_SECRET` is shorter than 32 characters or still a placeholder, or if the DB password is the development default |
+| Sign-in throttling | 10 failed sign-ins for one email, or 50 from one IP, within 15 minutes → `429` for 15 minutes |
+| No demo password in production | The sign-in page and Swagger don't show `triage-demo`; demo buttons only fill the email |
+| Security headers | HSTS, `nosniff`, `X-Frame-Options: DENY`, referrer and permissions policy; `Server` header removed |
+| Not exposed | Postgres and the API port are reachable only inside Docker; only Caddy publishes 80/443 |
+| Non-root | App containers run as user `triage` (uid 10001) |
+| Runs isolated from the API | "Run now" and "Resume" start the run as a separate process, so the API stays responsive and memory is released afterwards |
+| Health checks | `db` (pg_isready), `api` (`/api/health` every 30s, not written to the audit table), `scheduler` (DB reachable and job plan computes, every 5 min) |
+| Log rotation | Every container's logs are capped at 5 × 20 MB |
 
 ## How failures are handled
 
@@ -157,6 +173,8 @@ Containers restart automatically (`restart: unless-stopped`), including after a 
 | Browser shows a certificate error | Ports 80 and 443 must be open in the security group, and `SITE_HOST` must resolve to the Elastic IP. See `docker compose logs caddy` |
 | `api` stays unhealthy | `docker compose logs api`, usually a wrong `.env` value. Changing `POSTGRES_PASSWORD` after the first start doesn't change the existing DB's password; use `docker compose down -v` to start over (this wipes data) |
 | Login fails right after deploy | `bootstrap` hasn't run yet (step 3) |
+| `api` exits with "refusing to start in production" | Fix the named setting in `.env` (see Production safeguards), then `docker compose up -d` |
+| Sign-in says "too many failed sign-in attempts" | Wait 15 minutes, or `docker compose restart api` to clear the counter |
 | Build is killed or very slow | Too little memory. Use `t3.large`, and check swap is on (`free -h`) |
 
 ## Alternative without Docker

@@ -164,7 +164,9 @@ def serve(host: str = "0.0.0.0", port: int = 8000, reload: bool = False):
     import uvicorn
     uvicorn.run("triage.api.main:app", host=host, port=port, reload=reload,
                 # behind Caddy: take the client IP from X-Forwarded-For (the API port is not exposed)
-                proxy_headers=True, forwarded_allow_ips="*")
+                proxy_headers=True, forwarded_allow_ips="*",
+                # production logs are the JSON lines from our audit middleware; skip uvicorn's plain-text copy
+                access_log=settings.env != "production", server_header=False)
 
 
 if __name__ == "__main__":

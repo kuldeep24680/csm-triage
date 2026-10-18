@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..config import settings
+from ..config import production_problems, settings
 from ..db import system_tx, tenant_tx
 from ..features.build import FEATURES
 from ..observability import setup as setup_telemetry
@@ -48,7 +48,8 @@ app = FastAPI(
         "Ranks each CSM's accounts by churn risk, revenue and renewal urgency, explains why, and drafts "
         "outreach for human approval.\n\n"
         "**Tenancy:** the tenant comes from your token; every query is filtered by Postgres row-level "
-        "security.\n\n**Demo login:** `manager@northwind.example` / `triage-demo`."),
+        "security." + ("" if settings.env == "production" else
+                       "\n\n**Demo login:** `manager@northwind.example` / `triage-demo`.")),
     openapi_tags=TAGS,
     docs_url="/api/docs", redoc_url="/api/redoc", openapi_url="/api/openapi.json",
 )
@@ -60,6 +61,9 @@ FastAPIInstrumentor.instrument_app(app, excluded_urls="api/health")
 
 @app.on_event("startup")
 def _start_audit_writer():
+    problems = production_problems()
+    if problems:   # fail fast rather than run production with development secrets
+        raise RuntimeError("refusing to start in production: " + "; ".join(problems))
     start_writer()
 
 
@@ -113,12 +117,18 @@ class LoginIn(BaseModel):
     password: str
 
     model_config = {"json_schema_extra": {"examples": [{"email": "manager@northwind.example",
-                                                         "password": "triage-demo"}]}}
+                                                         "password": "your-password"}]}}
+
+
+@app.get("/api/auth/config", tags=["auth"], summary="What the sign-in page may show (public)")
+def auth_config():
+    # The development demo password is only hinted outside production.
+    return {"demo_password": None if settings.env == "production" else "triage-demo"}
 
 
 @app.post("/api/auth/login", tags=["auth"], summary="Sign in and get a bearer token")
-def api_login(body: LoginIn):
-    return login(body.email, body.password)
+def api_login(body: LoginIn, request: Request):
+    return login(body.email, body.password, request.client.host if request.client else None)
 
 
 @app.get("/api/health", tags=["observability"], summary="Liveness: database, active model, last run per tenant")
@@ -416,13 +426,29 @@ def _require_manager(user: User):
         raise HTTPException(403, "only CS managers can start or resume agent runs")
 
 
-def _background(target, *args):
-    """Single-server setup: run the job in a background thread of the API process.
-    The per-tenant database lock still prevents overlap with the scheduled run."""
-    import contextvars
+_procs: dict = {}   # tenant -> the run process this API started (busy check without a DB round trip race)
+
+
+def _ensure_idle(tenant_id: str) -> None:
+    p = _procs.get(tenant_id)
+    if p is not None and p.poll() is None:
+        raise HTTPException(409, "a run for this tenant is already in progress")
+
+
+def _spawn(tenant_id: str, argv: list[str]) -> None:
+    """Start an agent run as a child process, like the scheduler does.
+
+    A separate process keeps the API responsive (a run is CPU-heavy pandas work that
+    would otherwise compete with requests for the GIL) and returns the run's memory
+    to the OS when it ends. The per-tenant Postgres lock still prevents overlap with
+    a scheduled run.
+    """
+    import subprocess
+    import sys
     import threading
-    ctx = contextvars.copy_context()
-    threading.Thread(target=ctx.run, args=(target, *args), daemon=True, name="agent-run").start()
+    proc = subprocess.Popen([sys.executable, "-m", "triage", *argv], cwd=str(Path(__file__).resolve().parents[2]))
+    _procs[tenant_id] = proc
+    threading.Thread(target=proc.wait, daemon=True, name=f"run-reaper-{tenant_id}").start()
 
 
 class RunRequest(BaseModel):
@@ -434,7 +460,7 @@ class RunRequest(BaseModel):
 def start_run(body: RunRequest, user: User = Depends(current_user)):
     """Starts a fresh run in the background. Returns 409 if a run for this tenant is already in progress."""
     _require_manager(user)
-    from ..agent.runner import run_all
+    _ensure_idle(user.tenant_id)
     as_of = body.as_of or (date.today() if settings.use_wall_clock else settings.sim_end_date)
     with tenant_tx(user.tenant_id) as conn:
         busy = conn.execute("""SELECT run_id FROM agent_runs WHERE status='running'
@@ -443,7 +469,7 @@ def start_run(body: RunRequest, user: User = Depends(current_user)):
             raise HTTPException(409, f"a run is already in progress ({busy['run_id']})")
         conn.execute("INSERT INTO audit_log (tenant_id, actor, action, detail) VALUES (%s, %s, 'run.start', %s)",
                      (user.tenant_id, user.email, json.dumps({"as_of": str(as_of)})))
-    _background(run_all, as_of, user.tenant_id, "manual")
+    _spawn(user.tenant_id, ["run", "--tenant", user.tenant_id, "--as-of", str(as_of), "--trigger", "manual"])
     return {"status": "started", "tenant": user.tenant_id, "as_of": as_of}
 
 
@@ -452,16 +478,16 @@ def start_run(body: RunRequest, user: User = Depends(current_user)):
 def resume(run_id: uuid.UUID, user: User = Depends(current_user)):
     """Completed steps (ingest, identity, stored scores) and briefs already written are skipped."""
     _require_manager(user)
-    from ..agent.runner import resume_run
     with tenant_tx(user.tenant_id) as conn:
         r = conn.execute("SELECT status FROM agent_runs WHERE run_id=%s", (run_id,)).fetchone()
         if not r:
             raise HTTPException(404, "run not found")
         if r["status"] not in ("failed", "abandoned"):
             raise HTTPException(409, f"only failed or abandoned runs can be resumed (this one is {r['status']})")
+        _ensure_idle(user.tenant_id)
         conn.execute("""INSERT INTO audit_log (tenant_id, actor, action, entity) VALUES (%s, %s, 'run.resume', %s)""",
                      (user.tenant_id, user.email, f"agent_runs:{run_id}"))
-    _background(resume_run, str(run_id))
+    _spawn(user.tenant_id, ["run", "--resume", str(run_id)])
     return {"status": "resuming", "run_id": run_id}
 
 
