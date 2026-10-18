@@ -1,271 +1,164 @@
-# Deployment: one EC2 server
+# Deployment: Docker Compose on one EC2 server
 
-Everything runs on a single Ubuntu EC2 instance: Postgres, the API (which also serves the web app), the nightly agent runs, the watchdog and alerts. Scheduling, retries and recovery live in the app and systemd; no other AWS services are needed.
+Everything runs as four containers on one server. Scheduling, retries, recovery and alerts live in the app, so no other AWS services are needed.
 
-Allow about 45 minutes. Each step ends with a **Check**; don't move on until it passes.
+**Before this:** finish [EC2_SETUP.md](EC2_SETUP.md). That gives you the server, Docker, the cloned repo, a `<HOST>` name and the secrets.
+
+Allow about 20 minutes, mostly waiting for the image build and the first data load. Each step ends with a **Check**.
 
 ```
-Internet ──443──> Caddy (TLS) ──> uvicorn :8000 (API + web app) ──> Postgres :5432
-                                   systemd timers ──> triage run --tenant X (nightly, per tenant)
-                                                  ──> triage watchdog (06:30 UTC)
+Internet ─443─> caddy (TLS) ──> api :8000 (API + web app) ──> db (Postgres 16)
+                                scheduler ── nightly run per tenant (02:00 tenant-local)
+                                          └─ watchdog (06:30 UTC)
 ```
+
+| Container | What it does | Data |
+|---|---|---|
+| `db` | Postgres 16, not reachable from outside | volume `pgdata` |
+| `api` | Applies new DB migrations on start, then serves the API, Swagger and web app | volume `landing` (synthetic source files) |
+| `scheduler` | `python -m triage scheduler`: each tenant's nightly run plus the morning watchdog. Each job runs as a child process | same image as api |
+| `caddy` | HTTPS with an automatic Let's Encrypt certificate, ports 80 and 443 | volumes `caddy_data`, `caddy_config` |
+
+All commands below run on the server, in `~/csm-triage/deploy/docker`.
 
 ---
 
-## 0. Before you start
-
-| You need | Notes |
-|---|---|
-| AWS account + an EC2 key pair (`.pem`) | Region close to you, e.g. `ap-south-1` (Mumbai) |
-| GitHub access to `kuldeep24680/csm-triage` | The repo is private: you'll add a read-only deploy key in step 3 |
-| OpenAI API key | Optional. Without it briefs use the template writer |
-| Slack incoming-webhook URL | Optional. Without it alerts go to the log only |
-
----
-
-## 1. Launch the instance
-
-In the EC2 console, choose **Launch instance** and set:
-
-| Setting | Value |
-|---|---|
-| AMI | Ubuntu Server 24.04 LTS (x86_64) |
-| Type | `t3.large` (2 vCPU, 8 GB). Training and the first data load need the memory. You can drop to `t3.medium` afterwards |
-| Storage | 30 GB gp3 |
-| Security group | SSH 22 from **My IP** only; HTTP 80 and HTTPS 443 from anywhere |
-| Key pair | yours |
-
-Then allocate an **Elastic IP** and associate it with the instance, so the address survives a stop or start.
+## 1. Configure
 
 ```bash
-ssh -i ~/.ssh/<key>.pem ubuntu@<ELASTIC_IP>
+cd ~/csm-triage && git pull
+cd deploy/docker
+cp .env.example .env
+nano .env
 ```
-
-**Check:** you get a shell prompt.
-
----
-
-## 2. Install system packages
-
-```bash
-sudo apt update && sudo apt -y upgrade
-sudo apt -y install python3.12 python3.12-venv python3-pip postgresql git make jq
-# Node 22 (the frontend build needs Node 20.19+ or 22.12+)
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt -y install nodejs
-# Caddy (TLS reverse proxy)
-sudo apt -y install debian-keyring debian-archive-keyring apt-transport-https curl
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update && sudo apt -y install caddy
-```
-
-**Check:** `python3.12 --version` (3.12.x), `node --version` (v22.x), `psql --version` (16.x), `caddy version`.
-
----
-
-## 3. Get the code
-
-Create a service user, then a deploy key so the server can read the private repo:
-
-```bash
-sudo useradd --system --create-home --home-dir /opt/triage --shell /bin/bash triage
-sudo -u triage mkdir -p -m 700 /opt/triage/.ssh
-sudo -u triage ssh-keygen -t ed25519 -N "" -f /opt/triage/.ssh/id_ed25519
-sudo cat /opt/triage/.ssh/id_ed25519.pub
-```
-
-On GitHub, go to repo **Settings → Deploy keys → Add deploy key**, paste the key and leave write access **off**. Then:
-
-```bash
-sudo -u triage bash -c 'ssh-keyscan github.com >> ~/.ssh/known_hosts && \
-  git clone git@github.com:kuldeep24680/csm-triage.git /opt/triage/app'
-```
-
-> Note: the code lives in `/opt/triage/app`. The systemd unit files assume `/opt/triage`, so step 8 rewrites the paths.
-
-**Check:** `ls /opt/triage/app` shows `backend frontend deploy …`.
-
----
-
-## 4. Database
-
-```bash
-DBPASS=$(openssl rand -hex 16); echo "DB password: $DBPASS"   # keep it for step 6
-sudo -u postgres psql -c "CREATE ROLE triage LOGIN CREATEROLE PASSWORD '$DBPASS';"
-sudo -u postgres psql -c "CREATE DATABASE triage OWNER triage;"
-```
-
-- `triage` owns the schema. It needs `CREATEROLE` only so the migration can create the restricted `triage_app` role that row-level security runs under.
-- Postgres listens on localhost only (the Ubuntu default), so nothing else is exposed.
-
-**Check:** `PGPASSWORD=$DBPASS psql -h localhost -U triage -d triage -c 'select 1'` returns `1`.
-
----
-
-## 5. Install the app
-
-```bash
-sudo -u triage bash -c 'cd /opt/triage/app && python3.12 -m venv .venv && \
-  .venv/bin/pip install -q -r backend/requirements.txt && \
-  cd frontend && npm ci && npm run build'
-```
-
-**Check:** `ls /opt/triage/app/frontend/dist/index.html` exists. The API serves this folder, so no separate web server is needed for the frontend.
-
----
-
-## 6. Configuration and secrets
-
-```bash
-sudo mkdir -p /etc/triage
-sudo cp /opt/triage/app/deploy/ec2/triage.env.example /etc/triage/triage.env
-sudo nano /etc/triage/triage.env
-```
-
-Set these values:
 
 | Variable | Value |
 |---|---|
-| `TRIAGE_DATABASE_URL` | `postgresql://triage:<DBPASS>@localhost:5432/triage` |
-| `TRIAGE_JWT_SECRET` | output of `openssl rand -hex 32` |
-| `OPENAI_API_KEY` | your key, or leave empty |
-| `TRIAGE_ALERT_WEBHOOK_URL` | Slack webhook, or leave empty |
-| `TRIAGE_USE_WALL_CLOCK` | keep `false` for the demo (see the note in the file) |
+| `POSTGRES_PASSWORD` | `openssl rand -hex 16` |
+| `TRIAGE_JWT_SECRET` | `openssl rand -hex 32` |
+| `SITE_HOST` | `<HOST>` from EC2_SETUP step 10, e.g. `13-233-10-20.sslip.io` |
+| `TRIAGE_DEMO_PASSWORD` | Password for the demo logins |
+| `OPENAI_API_KEY` | Optional; empty means template briefs |
+| `TRIAGE_ALERT_WEBHOOK_URL` | Optional Slack webhook |
 
-Lock the file down:
-
-```bash
-sudo chown root:triage /etc/triage/triage.env && sudo chmod 640 /etc/triage/triage.env
-```
-
-Make a helper so manual commands see the same settings as systemd:
+Keep comments on their own line: `KEY=value  # note` would make `# note` part of the value.
 
 ```bash
-sudo tee /usr/local/bin/triage >/dev/null <<'EOF'
-#!/bin/bash
-# Run a triage CLI command as the triage user with the production settings.
-exec sudo -u triage bash -c 'set -a; source /etc/triage/triage.env; set +a; cd /opt/triage/app/backend && ../.venv/bin/python -m triage "$@"' _ "$@"
-EOF
-sudo chmod +x /usr/local/bin/triage
+chmod 600 .env
 ```
 
-**Check:** `triage --help` lists `migrate, generate, ingest, train, run, watchdog, …`.
+**Check:** `docker compose config --quiet && echo OK` prints `OK`. A missing required value makes it fail and names the variable.
 
 ---
 
-## 7. Load data and train (about 10 minutes)
+## 2. Build and start (about 5 minutes the first time)
 
 ```bash
-triage migrate              # creates schema, RLS policies, indexes
-triage generate             # synthetic landing zone, ~1.2M records (~1 min)
-triage ingest               # load + resolve identities, all tenants
-triage train                # fit, evaluate, register the model (~3 min)
-triage backfill --weeks 8   # 8 weekly runs so "what changed" and sparklines have history
-triage seed-users --password '<choose-a-demo-password>'
+docker compose up -d --build
 ```
 
-- Step 7 is a one-time load. After this, the nightly timers keep scores fresh.
-- `seed-users` prints the logins: one manager per tenant (`manager@<tenant>.example`) plus one per CSM.
-
-**Check:** `triage run --tenant quill --no-retry` ends with `"status": "succeeded"`.
+**Check:** `docker compose ps` shows `db`, `api`, `scheduler` and `caddy` all **running**, with `api` **(healthy)** after about 30 seconds.
 
 ---
 
-## 8. Install the services
-
-The unit files expect the code at `/opt/triage`. Point them at `/opt/triage/app`, then install them:
+## 3. Load data and train (one time, about 10 minutes)
 
 ```bash
-cd /opt/triage/app/deploy/ec2
-for f in *.service *.timer; do
-  sed -e 's#/opt/triage/backend#/opt/triage/app/backend#g' \
-      -e 's#/opt/triage/.venv#/opt/triage/app/.venv#g' "$f" | sudo tee /etc/systemd/system/$f >/dev/null
-done
-sudo systemctl daemon-reload
-sudo systemctl enable --now triage-api triage-watchdog.timer
-for t in northwind helios quill; do sudo systemctl enable --now triage-run@$t.timer; done
+docker compose exec api python -m triage bootstrap
 ```
 
-Run each tenant at 02:00 in its own timezone:
+This migrates, generates the synthetic data (~1.2M records), ingests it, trains the model, replays 8 weekly runs for history and creates the logins. Re-running it is safe: each step is skipped if its result already exists.
+
+**Check:** the output ends with `bootstrap: done`. Then:
 
 ```bash
-for pair in northwind:America/New_York helios:Europe/London quill:Asia/Kolkata; do
-  t=${pair%%:*}; tz=${pair#*:}
-  sudo mkdir -p /etc/systemd/system/triage-run@$t.timer.d
-  printf '[Timer]\nOnCalendar=\nOnCalendar=*-*-* 02:00:00 %s\n' "$tz" | \
-    sudo tee /etc/systemd/system/triage-run@$t.timer.d/schedule.conf >/dev/null
-done
-sudo systemctl daemon-reload
+docker compose exec api python -m triage run --tenant quill --no-retry | tail -5
 ```
+
+That should show `"status": "succeeded"`.
+
+---
+
+## 4. Open the app
+
+Go to `https://<HOST>`:
+
+- [ ] Padlock shows a valid certificate. The first request can take ~20 seconds while Caddy obtains it.
+- [ ] Log in as `manager@northwind.example` with your demo password, and the call list loads.
+- [ ] An account page opens quickly, with the brief and timeline.
+- [ ] Swagger works at `https://<HOST>/api/docs`.
+- [ ] `curl -s https://<HOST>/api/health | jq .ok` returns `true`.
+
+---
+
+## 5. Prove the unattended path
+
+```bash
+docker compose exec scheduler python -m triage scheduler --dry-run
+```
+
+This prints the next fire time for each job, in UTC: quill 20:30, helios 01:00 or 02:00 (depending on UK summer time), northwind 06:00 or 07:00, watchdog 06:30.
+
+```bash
+docker compose logs scheduler | tail
+```
+
+This shows `scheduler started` and `next job …`.
+
+To see a scheduled run without waiting for 02:00, set `TRIAGE_SCHEDULE_RUN_AT` in `.env` to 2 minutes from now (tenant-local time), then:
+
+```bash
+docker compose up -d scheduler          # restart with the new setting
+docker compose logs -f scheduler        # wait for "job end run:<tenant> rc=0"
+```
+
+Afterwards, set it back to `02:00` and run `docker compose up -d scheduler` again.
 
 **Check:**
-- `systemctl status triage-api` shows **active (running)**.
-- `curl -s localhost:8000/api/health | jq .` returns `"ok": true`, the active model and the last successful run per tenant.
-- `systemctl list-timers 'triage-*'` shows 3 run timers and the watchdog, each with a next run time.
-
----
-
-## 9. HTTPS
-
-There's no need to buy a domain: `sslip.io` turns the IP into a hostname that Caddy can get a Let's Encrypt certificate for. If you own a domain, point an A record at the Elastic IP and use that name instead.
-
-```bash
-HOST="$(curl -s https://checkip.amazonaws.com | tr . -).sslip.io"; echo $HOST
-sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
-$HOST {
-    encode gzip
-    reverse_proxy 127.0.0.1:8000
-}
-EOF
-sudo systemctl reload caddy
-```
-
-**Check:** open `https://<HOST>` in a browser, then:
-- the padlock shows a valid certificate
-- you can log in as `manager@northwind.example`
-- the call list loads
-- Swagger works at `https://<HOST>/api/docs`
-
----
-
-## 10. Prove the unattended path works
-
-```bash
-sudo systemctl start triage-run@quill            # exactly what the timer does at 02:00
-journalctl -u triage-run@quill -o cat | tail -5 | jq -c '{msg, run_id, trace_id}'
-triage alert "deployment test"                   # Slack message, or an ERROR line in the log
-```
-
-**Check:**
-- In the app, **Agent runs** shows a new run with trigger **schedule** and status succeeded.
-- The next morning, the overnight runs appear with trigger **schedule** without you doing anything.
+- **Agent runs** in the app shows runs with trigger **schedule**.
+- The next morning, the overnight runs are there without you doing anything.
 
 ---
 
 ## Day-2 operations
 
-| Task | Command |
+| Task | Command (in `deploy/docker`) |
 |---|---|
-| Deploy a new version | `sudo -u triage git -C /opt/triage/app pull && sudo -u triage bash -c 'cd /opt/triage/app && .venv/bin/pip install -q -r backend/requirements.txt && cd frontend && npm ci && npm run build' && triage migrate && sudo systemctl restart triage-api` |
-| API logs | `journalctl -u triage-api -f -o cat \| jq -c .` |
-| A run's logs | `journalctl -u triage-run@northwind -o cat \| jq -c .` |
-| Re-run or resume | In the app (managers): **Agent runs → Run now / Resume**, or `triage run --resume <run_id>` |
-| A user complains | `GET /api/audit/requests?user_name=<name>` → copy the `trace_id` → `journalctl -u triage-api -o cat \| grep <trace_id>` |
-| Retrain | `triage train` (the new version becomes active for the next run) |
-| Backup | `sudo -u postgres pg_dump triage \| gzip > /opt/triage/backup-$(date +%F).sql.gz` |
+| Deploy a new version | `git pull && docker compose up -d --build`. The api applies new migrations on start |
+| Status | `docker compose ps` |
+| Logs | `docker compose logs -f api` / `scheduler` (JSON lines with trace_id, user_name, run_id) |
+| A user complains | `GET /api/audit/requests?user_name=<name>` → copy `trace_id` → `docker compose logs api \| grep <trace_id>` |
+| Run now / resume | App: **Agent runs → Run now / Resume** (managers). CLI: `docker compose exec api python -m triage run --tenant <t>` or `run --resume <run_id>` |
+| Any CLI command | `docker compose exec api python -m triage <command>` |
+| Retrain | `docker compose exec api python -m triage train` (used from the next run) |
+| Backup DB | `docker compose exec -T db pg_dump -U triage triage \| gzip > ~/triage-$(date +%F).sql.gz` |
+| Restore DB | `gunzip -c <file> \| docker compose exec -T db psql -U triage triage` |
+| Restart everything | `docker compose restart` |
+| Stop (keep data) | `docker compose down` |
+| Wipe everything | `docker compose down -v`. **Deletes the database and data volumes** |
+
+Containers restart automatically (`restart: unless-stopped`), including after a server reboot. Docker starts on boot.
+
+## How failures are handled
+
+| Failure | What happens |
+|---|---|
+| A nightly run fails | It resumes once automatically from the failed step. If that also fails, an alert is sent and the run waits for a manager to **Resume** |
+| A run is killed (out of memory, timeout) | The scheduler alerts. The watchdog marks the run `abandoned` and starts the missing run |
+| Server down at 02:00 | The 06:30 UTC watchdog starts any missing run |
+| api crashes | Docker restarts it; Caddy keeps serving once it's back |
+| Two runs for one tenant | Prevented by a Postgres advisory lock |
 
 ## Troubleshooting
 
-| Symptom | Likely cause and fix |
+| Symptom | Fix |
 |---|---|
-| `triage-api` restarts in a loop | Bad value in `/etc/triage/triage.env`. A `# comment` after a value breaks systemd, so put comments on their own line. See `journalctl -u triage-api -n 50` |
-| `permission denied to create role` during migrate | The `triage` DB role is missing `CREATEROLE` (step 4) |
-| Caddy can't get a certificate | Ports 80 and 443 aren't open in the security group, or the host name doesn't resolve to this IP |
-| Run fails at briefs with OpenAI errors | Check the key and quota. The run falls back to template briefs per account, so it still succeeds |
-| Out of memory during `train` or `ingest` | Use `t3.large` for the initial load (step 1) |
+| `docker compose config` says `set POSTGRES_PASSWORD` (or another variable) | Fill it in `deploy/docker/.env` |
+| Browser shows a certificate error | Ports 80 and 443 must be open in the security group, and `SITE_HOST` must resolve to the Elastic IP. See `docker compose logs caddy` |
+| `api` stays unhealthy | `docker compose logs api`, usually a wrong `.env` value. Changing `POSTGRES_PASSWORD` after the first start doesn't change the existing DB's password; use `docker compose down -v` to start over (this wipes data) |
+| Login fails right after deploy | `bootstrap` hasn't run yet (step 3) |
+| Build is killed or very slow | Too little memory. Use `t3.large`, and check swap is on (`free -h`) |
 
-## Cost and shutdown
+## Alternative without Docker
 
-- `t3.large` costs about $0.08/hour plus 30 GB gp3 storage, roughly $65/month if left on.
-- Stopping the instance keeps the disk and the Elastic IP, but an Elastic IP attached to a stopped instance is billed.
-- To tear down: terminate the instance, then release the Elastic IP.
+The systemd units in `deploy/ec2/` (see its README) run the same app directly on the host. Use one or the other, not both.

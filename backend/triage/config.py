@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     use_wall_clock: bool = False          # production: score "today" (tenant-local); demo: sim_end_date
     retry_backoff_s: int = 30             # wait before the single automatic retry of a failed run
     alert_webhook_url: str = ""           # Slack-compatible incoming webhook; empty -> alerts only logged
+    schedule_run_at: str = "02:00"        # nightly run, in each tenant's own timezone (Docker scheduler)
+    schedule_watchdog_at: str = "06:30"   # UTC: stuck/missing-run check before the working day
 
 
 settings = Settings()

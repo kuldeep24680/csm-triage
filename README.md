@@ -104,7 +104,7 @@ Without an OpenAI key, briefs come from a deterministic template writer: same fa
 
 ## Operations: scheduling, recovery, observability
 
-- **Nightly runs** per tenant via systemd timers on a single EC2 host ([`deploy/ec2/`](deploy/ec2/README.md)).
+- **Deployment:** Docker Compose on a single EC2 host (`db`, `api`, `scheduler`, `caddy`); see [`project_context/DEPLOYMENT.md`](project_context/DEPLOYMENT.md). The built-in scheduler runs each tenant nightly at 02:00 in its own timezone, plus a morning watchdog. A systemd alternative is in [`deploy/ec2/`](deploy/ec2/README.md).
 - **Recovery:** heartbeat after every step and brief batch; a failed run is **retried automatically once** from the failed step; dead runs are marked `abandoned`; a morning watchdog starts any missing run. After that, **CS managers** can **Resume** (or **Run now**) from the Agent runs page; CSMs can't.
 - **Alerts:** Slack-compatible webhook (`TRIAGE_ALERT_WEBHOOK_URL`) for failed, partial, abandoned or missing runs.
 - **OpenTelemetry:** traces (API requests, every DB query, each run step, each LLM call), metrics (API rate/errors/latency, run/step durations, LLM tokens, briefs), exported over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.

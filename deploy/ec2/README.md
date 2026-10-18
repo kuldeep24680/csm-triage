@@ -1,6 +1,6 @@
 # Single-EC2 deployment (systemd)
 
-> Step-by-step first-time setup: [project_context/DEPLOYMENT.md](../../project_context/DEPLOYMENT.md). This page is the reference for what runs where.
+> **Alternative deployment.** The main path is Docker Compose ([project_context/DEPLOYMENT.md](../../project_context/DEPLOYMENT.md)). Use these systemd units only if you deploy without Docker; never run both.
 
 Everything runs on one EC2 instance; scheduling, retries, alerting and recovery live in the app.
 

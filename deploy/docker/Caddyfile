@@ -1,0 +1,6 @@
+# HTTPS with an automatic Let's Encrypt certificate for SITE_HOST.
+# For a plain-HTTP local test, set SITE_HOST=:80
+{$SITE_HOST} {
+	encode gzip
+	reverse_proxy api:8000
+}

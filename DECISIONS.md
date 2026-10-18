@@ -66,7 +66,7 @@ One line of context per decision. Most of these are things a reviewer will ask a
 | # | Decision | Why |
 |---|---|---|
 | O1 | Nightly batch, not real-time | Weekly prioritisation problem; churn builds over weeks (median 86-day lead). Event-driven alerts are a later layer |
-| O2 | Single EC2 + systemd timers; scheduling, retries, alerts in the app | Fewest moving parts for v1; nothing AWS-specific to operate |
+| O2 | Single EC2 + Docker Compose (db, api, scheduler, caddy); scheduling, retries, alerts in the app | Same setup on any machine, one-command deploys and rollbacks, Postgres versioned with the app; nothing AWS-specific to operate. systemd units kept as a no-Docker alternative |
 | O3 | **One** automatic retry, resumed from the failed step | Recovers transient failures without hiding real ones; repeated failures need a human |
 | O4 | Resume skips durable steps and already-written briefs | No duplicate work or LLM spend; resumed run keeps its original model version |
 | O5 | Heartbeat + `abandoned` status + morning watchdog | A killed process can't leave a run "running" forever, and a missing run is noticed before the working day |

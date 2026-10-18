@@ -145,3 +145,16 @@ def test_template_brief_survives_a_day_of_drift():
     tomorrow = [dict(facts[0], text=facts[0]["text"].replace("35", "34")), dict(facts[1], text="Estimated renewal risk 44%."), facts[2]]
     again, dropped2 = grounding.validate(out, tomorrow)
     assert not dropped and not dropped2 and again["email"] and len(again["talking_points"]) == len(out["talking_points"])
+
+
+def test_scheduler_fires_at_tenant_local_time():
+    from datetime import datetime, timezone
+    from triage.scheduler import next_local, plan
+    now = datetime(2026, 10, 18, 15, 0, tzinfo=timezone.utc)           # 20:30 in Kolkata
+    assert next_local(now, "02:00", "Asia/Kolkata") == datetime(2026, 10, 18, 20, 30, tzinfo=timezone.utc)
+    assert next_local(now, "02:00", "America/New_York") == datetime(2026, 10, 19, 6, 0, tzinfo=timezone.utc)   # EDT
+    winter = datetime(2026, 12, 1, 12, 0, tzinfo=timezone.utc)
+    assert next_local(winter, "02:00", "America/New_York") == datetime(2026, 12, 2, 7, 0, tzinfo=timezone.utc)  # EST
+    jobs = plan(now, {"quill": "Asia/Kolkata", "northwind": "America/New_York"})
+    assert [j.name for j in jobs] == ["run:quill", "run:northwind", "watchdog"]
+    assert jobs[0].argv == ("run", "--tenant", "quill", "--trigger", "schedule")

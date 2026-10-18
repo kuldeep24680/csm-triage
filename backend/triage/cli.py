@@ -116,9 +116,55 @@ def seed_users(password: str = "triage-demo"):
 
 
 @app.command()
+def scheduler(dry_run: bool = typer.Option(False, help="print the next fire time of every job and exit")):
+    """Long-running scheduler (Docker): nightly run per tenant in its timezone + morning watchdog."""
+    from datetime import datetime, timezone
+    from .scheduler import loop, plan, tenant_timezones
+    if dry_run:
+        for j in plan(datetime.now(timezone.utc), tenant_timezones()):
+            typer.echo(f"{j.at.isoformat()}  {j.name:16s}  python -m triage {' '.join(j.argv)}")
+        return
+    loop()
+
+
+@app.command()
+def bootstrap(demo_password: str = typer.Option(..., envvar="TRIAGE_DEMO_PASSWORD",
+                                                help="password for the seeded demo logins"),
+              weeks: int = 8):
+    """First-time setup, safe to re-run: migrate, generate, ingest, train, backfill, seed users.
+    Each step is skipped when its result already exists."""
+    from .db import migrate as m, system_tx
+    typer.echo(f"migrate: {m()}")
+    if not any(settings.data_dir.glob("landing/*/_tenant.json")):
+        typer.echo("generate: creating the synthetic landing zone ...")
+        generate(end=None, years=settings.sim_years, seed=settings.seed)
+    else:
+        typer.echo("generate: skipped (landing zone exists)")
+    with system_tx() as conn:
+        has_model = conn.execute("SELECT 1 FROM models WHERE is_active").fetchone()
+        has_runs = conn.execute("SELECT 1 FROM agent_runs LIMIT 1").fetchone()
+    if not has_runs:
+        ingest(tenant=None, up_to=None)   # idempotent; later runs ingest new files themselves
+    if not has_model:
+        typer.echo("train: fitting the model ...")
+        train(as_of=None, activate=True)
+    else:
+        typer.echo("train: skipped (active model exists)")
+    if not has_runs:
+        typer.echo(f"backfill: {weeks} weekly runs ...")
+        backfill(weeks=weeks, as_of=None, tenant=None)
+    else:
+        typer.echo("backfill: skipped (runs exist)")
+    seed_users(password=demo_password)
+    typer.echo("bootstrap: done")
+
+
+@app.command()
 def serve(host: str = "0.0.0.0", port: int = 8000, reload: bool = False):
     import uvicorn
-    uvicorn.run("triage.api.main:app", host=host, port=port, reload=reload)
+    uvicorn.run("triage.api.main:app", host=host, port=port, reload=reload,
+                # behind Caddy: take the client IP from X-Forwarded-For (the API port is not exposed)
+                proxy_headers=True, forwarded_allow_ips="*")
 
 
 if __name__ == "__main__":
