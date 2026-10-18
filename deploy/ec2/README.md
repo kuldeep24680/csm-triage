@@ -11,7 +11,7 @@ Everything runs on one EC2 instance; scheduling, retries, alerting and recovery 
 | Stuck / missing runs | `triage-watchdog.timer` (06:30 UTC): marks runs with no heartbeat for 15 min as `abandoned`, starts today's run if missing |
 | Alerts | Slack webhook from the app (`TRIAGE_ALERT_WEBHOOK_URL`); systemd `OnFailure=` → `triage-alert@` |
 | Manual recovery | CS managers: **Agent runs → Resume** (or **Run now**); CLI: `python -m triage run --resume <run_id>` |
-| Telemetry | app → OTLP → `otelcol-contrib` on localhost:4318 → Grafana Cloud (`otel-collector.yaml`) |
+| Telemetry | OpenTelemetry in-process: every log line carries trace_id/span context. Export is optional: set `OTEL_EXPORTER_OTLP_ENDPOINT` + run `otel-collector.yaml` only if a tracing backend is wanted (not needed for this deployment) |
 | Logs | JSON to journald (`TRIAGE_LOG_FORMAT=json`), each line with trace_id, request_id, tenant, user_name, run_id |
 
 ## Install (Ubuntu 22.04+)
@@ -38,5 +38,4 @@ curl -s localhost:8000/api/health | jq .         # last success per tenant, stuc
 
 ## A user complains ("the page was slow / wrong at 10:05")
 1. `GET /api/audit/requests?user_name=<name>` (manager) → find the request, copy its `trace_id`.
-2. Open that trace in Grafana (Tempo) → see every DB query and its timing.
-3. `journalctl -u triage-api -o cat | grep <trace_id>` → every log line for that request.
+2. `journalctl -u triage-api -o cat | grep <trace_id>` → every log line for that request (DB timing via `X-Response-Time-ms` / `latency_ms`).
