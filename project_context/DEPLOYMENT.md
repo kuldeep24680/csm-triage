@@ -2,9 +2,9 @@
 
 Everything runs as four containers on one server. Scheduling, retries, recovery and alerts live in the app, so no other AWS services are needed.
 
-**Before this:** finish [EC2_SETUP.md](EC2_SETUP.md). That gives you the server, Docker, the cloned repo, a `<HOST>` name and the secrets.
+**Before this:** finish [EC2_SETUP.md](EC2_SETUP.md). That gives you the server with Docker and a `<HOST>` name. The repo lives at **`/opt/csm-triage`**.
 
-Allow about 20 minutes, mostly waiting for the image build and the first data load. Each step ends with a **Check**.
+Allow about 25 minutes, mostly waiting for the image build and the first data load. Each step ends with a **Check**.
 
 ```
 Internet ─443─> caddy (TLS) ──> api :8000 (API + web app) ──> db (Postgres 16)
@@ -19,79 +19,166 @@ Internet ─443─> caddy (TLS) ──> api :8000 (API + web app) ──> db (Po
 | `scheduler` | `python -m triage scheduler`: each tenant's nightly run plus the morning watchdog. Each job runs as a child process | same image as api |
 | `caddy` | HTTPS with an automatic Let's Encrypt certificate, ports 80 and 443 | volumes `caddy_data`, `caddy_config` |
 
-All commands below run on the server, in `~/csm-triage/deploy/docker`.
+---
+
+## Quick version
+
+For when you've done this before. Each command is explained in steps 0–6 below.
+
+```bash
+ssh -i ~/.ssh/triage-key.pem ubuntu@<EIP>
+cd /opt/csm-triage && git pull
+cd deploy/docker && cp -n .env.example .env && nano .env && chmod 600 .env
+docker compose config --quiet && echo OK
+docker compose up -d --build
+tmux new -s triage                                  # survives an SSH drop
+docker compose exec api python -m triage bootstrap  # ~10 min, one time
+# open https://<HOST>
+```
 
 ---
 
-## 1. Configure
+## 0. Pre-flight on the server
 
 ```bash
-cd ~/csm-triage && git pull
-cd deploy/docker
-cp .env.example .env
-nano .env
+ssh -i ~/.ssh/triage-key.pem ubuntu@<EIP>
+docker run --rm hello-world >/dev/null && echo "docker OK"     # no sudo needed
+docker compose version
+free -h                                                        # ~7.6 GB RAM + 4 GB swap
+df -h /                                                        # 20+ GB free
 ```
 
-| Variable | Value |
-|---|---|
-| `POSTGRES_PASSWORD` | `openssl rand -hex 16` |
-| `TRIAGE_JWT_SECRET` | `openssl rand -hex 32` |
-| `SITE_HOST` | `<HOST>` from EC2_SETUP step 10, e.g. `13-233-10-20.sslip.io` |
-| `TRIAGE_DEMO_PASSWORD` | Password for the demo logins |
-| `OPENAI_API_KEY` | Optional; empty means template briefs |
-| `TRIAGE_ALERT_WEBHOOK_URL` | Optional Slack webhook |
+If `docker` says *permission denied*, log out and back in (EC2_SETUP step 8).
 
-Keep comments on their own line: `KEY=value  # note` would make `# note` part of the value.
+**Get the code into `/opt/csm-triage`.** Skip this if it's already there.
 
 ```bash
+sudo mkdir -p /opt/csm-triage && sudo chown ubuntu:ubuntu /opt/csm-triage
+git clone git@github.com:kuldeep24680/csm-triage.git /opt/csm-triage
+```
+
+**Check:** `ls /opt/csm-triage` shows `Dockerfile backend deploy frontend project_context …`.
+
+---
+
+## 1. Get the latest code
+
+Push from your Mac first (`git push`), then on the server:
+
+```bash
+cd /opt/csm-triage
+git pull
+git log --oneline -1          # matches your latest commit on GitHub
+ls Dockerfile deploy/docker/compose.yml deploy/docker/Caddyfile
+```
+
+**Check:** all three files are listed.
+
+---
+
+## 2. Configure secrets and settings
+
+All remaining commands run in **`/opt/csm-triage/deploy/docker`**.
+
+```bash
+cd /opt/csm-triage/deploy/docker
+cp -n .env.example .env       # -n: never overwrites an existing .env
+```
+
+Fill in the required values. These commands generate the secrets for you; replace `<HOST>` and the demo password:
+
+```bash
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+sed -i "s/^TRIAGE_JWT_SECRET=.*/TRIAGE_JWT_SECRET=$(openssl rand -hex 32)/" .env
+sed -i "s/^SITE_HOST=.*/SITE_HOST=<HOST>/" .env                       # e.g. 13-233-10-20.sslip.io
+sed -i "s/^TRIAGE_DEMO_PASSWORD=.*/TRIAGE_DEMO_PASSWORD=<choose-one>/" .env
+nano .env                     # optional: OPENAI_API_KEY, TRIAGE_ALERT_WEBHOOK_URL
 chmod 600 .env
 ```
 
-**Check:** `docker compose config --quiet && echo OK` prints `OK`. A missing required value makes it fail and names the variable.
+| Variable | Required | Value |
+|---|---|---|
+| `POSTGRES_PASSWORD` | yes | Random (generated above). **Set once**: changing it later doesn't change the existing database's password |
+| `TRIAGE_JWT_SECRET` | yes | Random, at least 32 characters. The API refuses to start with a weak one |
+| `SITE_HOST` | yes | `<HOST>` from EC2_SETUP step 10, or your own domain |
+| `TRIAGE_DEMO_PASSWORD` | yes | Password for all demo logins (managers and CSMs) |
+| `OPENAI_API_KEY` | no | Empty means template briefs |
+| `TRIAGE_ALERT_WEBHOOK_URL` | no | Slack incoming webhook for run failures |
+| `TRIAGE_ENV` | keep `production` | Turns on the safety checks |
+| `TRIAGE_USE_WALL_CLOCK` | keep `false` | Demo data ends 2026-10-16; runs keep scoring that date |
+
+Keep comments on their own line: `KEY=value  # note` would make `# note` part of the value.
+
+**Check:**
+
+```bash
+docker compose config --quiet && echo OK
+grep -c CHANGE_ME .env        # must print 0
+```
 
 ---
 
-## 2. Build and start (about 5 minutes the first time)
+## 3. Build and start (about 5 minutes the first time)
 
 ```bash
 docker compose up -d --build
 ```
 
-**Check:** `docker compose ps` shows `db`, `api`, `scheduler` and `caddy` all **running**, with `api` **(healthy)** after about 30 seconds.
+This pulls `postgres:16` and `caddy:2`, builds the app image (web build + Python dependencies), then starts `db` → `api` → `scheduler` → `caddy`, each waiting for the previous one to be healthy.
+
+```bash
+docker compose ps
+docker compose logs api | tail -5
+```
+
+**Check:**
+- `db` and `api` show **(healthy)**; `scheduler` shows **(healthy)** within a few minutes; `caddy` is **Up**.
+- `docker compose logs api` ends with `Application startup complete`, and does **not** say `refusing to start in production`. If it does, fix the setting it names in `.env`, then `docker compose up -d`.
 
 ---
 
-## 3. Load data and train (one time, about 10 minutes)
+## 4. Load data and train (one time, about 10 minutes)
+
+Run it inside `tmux`, so an SSH disconnect doesn't kill it:
 
 ```bash
+tmux new -s triage            # later: Ctrl-b d to detach, `tmux attach -t triage` to return
+cd /opt/csm-triage/deploy/docker
 docker compose exec api python -m triage bootstrap
 ```
 
-This migrates, generates the synthetic data (~1.2M records), ingests it, trains the model, replays 8 weekly runs for history and creates the logins. Re-running it is safe: each step is skipped if its result already exists.
+This creates the schema, generates the synthetic data (~1.2M records), ingests it, trains the model, replays 8 weekly runs for history and creates the logins. Re-running it is safe: each step is skipped if its result already exists.
 
 **Check:** the output ends with `bootstrap: done`. Then:
 
 ```bash
-docker compose exec api python -m triage run --tenant quill --no-retry | tail -5
+docker compose exec api python -m triage run --tenant quill --no-retry | grep '"status"' | head -1
 ```
 
-That should show `"status": "succeeded"`.
+That should print `"status": "succeeded"`.
 
 ---
 
-## 4. Open the app
+## 5. Open the app
 
 Go to `https://<HOST>`:
 
-- [ ] Padlock shows a valid certificate. The first request can take ~20 seconds while Caddy obtains it.
-- [ ] Log in as `manager@northwind.example` with your demo password, and the call list loads.
-- [ ] An account page opens quickly, with the brief and timeline.
+- [ ] Padlock shows a valid certificate. The first request can take ~20 seconds while Caddy obtains it; `docker compose logs caddy | grep -i certificate` shows progress.
+- [ ] Sign in as `manager@northwind.example` with your `TRIAGE_DEMO_PASSWORD`, and the call lists load.
+- [ ] Pick a CSM, then open an account: the brief, "Why" bars and recent activity show; clicking a signal opens its source rows.
+- [ ] **Agent runs → Run now** starts a run, which shows **succeeded** after about 20 seconds.
 - [ ] Swagger works at `https://<HOST>/api/docs`.
-- [ ] `curl -s https://<HOST>/api/health | jq .ok` returns `true`.
+- [ ] From your Mac: `curl -s https://<HOST>/api/health | jq .ok` returns `true`.
+
+Every login uses the same `TRIAGE_DEMO_PASSWORD`. To list them (one manager per company, plus each CSM):
+
+```bash
+docker compose exec -T db psql -U triage -d triage -c "SELECT tenant_id, role, email FROM users ORDER BY 1, 2, 3"
+```
 
 ---
 
-## 5. Prove the unattended path
+## 6. Prove the unattended path
 
 ```bash
 docker compose exec scheduler python -m triage scheduler --dry-run
@@ -105,26 +192,26 @@ docker compose logs scheduler | tail
 
 This shows `scheduler started` and `next job …`.
 
-To see a scheduled run without waiting for 02:00, set `TRIAGE_SCHEDULE_RUN_AT` in `.env` to 2 minutes from now (tenant-local time), then:
+To see a scheduled run now instead of at 02:00, set `TRIAGE_SCHEDULE_RUN_AT` in `.env` to 2 minutes from now **in that tenant's local time** (quill = India time), then:
 
 ```bash
-docker compose up -d scheduler          # restart with the new setting
-docker compose logs -f scheduler        # wait for "job end run:<tenant> rc=0"
+docker compose up -d scheduler          # restarts it with the new setting
+docker compose logs -f scheduler        # wait for "job end run:quill rc=0", then Ctrl-c
+sed -i "s/^TRIAGE_SCHEDULE_RUN_AT=.*/TRIAGE_SCHEDULE_RUN_AT=02:00/" .env
+docker compose up -d scheduler          # back to 02:00
 ```
 
-Afterwards, set it back to `02:00` and run `docker compose up -d scheduler` again.
-
 **Check:**
-- **Agent runs** in the app shows runs with trigger **schedule**.
+- **Agent runs** in the app shows a run with trigger **schedule**.
 - The next morning, the overnight runs are there without you doing anything.
 
 ---
 
 ## Day-2 operations
 
-| Task | Command (in `deploy/docker`) |
+| Task | Command (in `/opt/csm-triage/deploy/docker`) |
 |---|---|
-| Deploy a new version | `git pull && docker compose up -d --build`. The api applies new migrations on start |
+| Deploy a new version | `git -C /opt/csm-triage pull && docker compose up -d --build`. The api applies new migrations on start |
 | Status | `docker compose ps` |
 | Logs | `docker compose logs -f api` / `scheduler` (JSON lines with trace_id, user_name, run_id) |
 | A user complains | `GET /api/audit/requests?user_name=<name>` → copy `trace_id` → `docker compose logs api \| grep <trace_id>` |

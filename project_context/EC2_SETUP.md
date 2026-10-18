@@ -177,10 +177,11 @@ Host github.com
   IdentitiesOnly yes
 EOF
 ssh-keyscan github.com >> ~/.ssh/known_hosts
-git clone git@github.com:kuldeep24680/csm-triage.git ~/csm-triage
+sudo mkdir -p /opt/csm-triage && sudo chown ubuntu:ubuntu /opt/csm-triage
+git clone git@github.com:kuldeep24680/csm-triage.git /opt/csm-triage
 ```
 
-**Check:** `ls ~/csm-triage` shows `backend frontend deploy project_context …`.
+**Check:** `ls /opt/csm-triage` shows `backend frontend deploy project_context …`.
 
 ---
 
@@ -220,11 +221,11 @@ You should have:
 - [ ] Security group: 22 (your IP), 80, 443 only
 - [ ] 4 GB swap, host in UTC
 - [ ] Docker and Compose installed, with log rotation
-- [ ] Repo cloned at `~/csm-triage` via a read-only deploy key
+- [ ] Repo cloned at `/opt/csm-triage` via a read-only deploy key
 - [ ] `<HOST>` noted and resolving to the EIP
 - [ ] Secrets ready
 
-Next: `git pull` in `~/csm-triage`, then follow [DEPLOYMENT.md](DEPLOYMENT.md).
+Next: `git pull` in `/opt/csm-triage`, then follow [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 
