@@ -61,6 +61,19 @@ One line of context per decision. Most of these are things a reviewer will ask a
 | T2 | JWT carries the tenant; handlers can't choose it | |
 | T3 | Model metadata is filtered per tenant too (the model card hides other tenants' metrics) | Metrics are data |
 
+## Operations
+
+| # | Decision | Why |
+|---|---|---|
+| O1 | Nightly batch, not real-time | Weekly prioritisation problem; churn builds over weeks (median 86-day lead). Event-driven alerts are a later layer |
+| O2 | Single EC2 + systemd timers; scheduling, retries, alerts in the app | Fewest moving parts for v1; nothing AWS-specific to operate |
+| O3 | **One** automatic retry, resumed from the failed step | Recovers transient failures without hiding real ones; repeated failures need a human |
+| O4 | Resume skips durable steps and already-written briefs | No duplicate work or LLM spend; resumed run keeps its original model version |
+| O5 | Heartbeat + `abandoned` status + morning watchdog | A killed process can't leave a run "running" forever, and a missing run is noticed before the working day |
+| O6 | Only CS managers can start/resume runs | Operational action with cost (LLM) and team-wide effect |
+| O7 | OpenTelemetry over OTLP to a local collector | Vendor-neutral; Grafana Cloud or CloudWatch is a collector config change |
+| O8 | `user_name` + `trace_id` on audit rows, logs and spans; `user_name` on request metrics | A complaint can be traced from a name to the exact request. Per-user metric labels are fine at tens of users; drop them at thousands to bound cardinality |
+
 ## Deliberately skipped (v1)
 
 Real connectors, sending email, SSO, per-tenant models, expansion scoring, a human review UI for unresolved identities (the queue is listed, not actionable), streaming ingestion, Alembic (plain ordered SQL migrations instead: RLS policies are SQL anyway).

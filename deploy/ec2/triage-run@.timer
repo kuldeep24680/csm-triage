@@ -1,0 +1,15 @@
+# Default 02:00 UTC. Per tenant, set its own local time with a drop-in, e.g.
+#   systemctl edit triage-run@northwind.timer
+#   [Timer]
+#   OnCalendar=
+#   OnCalendar=*-*-* 02:00:00 America/New_York
+[Unit]
+Description=Nightly Triage agent run (%i)
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 UTC
+Persistent=true              # if the server was down at 02:00, run as soon as it is back
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

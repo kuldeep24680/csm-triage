@@ -1,0 +1,14 @@
+[Unit]
+Description=Triage API + web app
+After=network-online.target postgresql.service
+
+[Service]
+User=triage
+WorkingDirectory=/opt/triage/backend
+EnvironmentFile=/etc/triage/triage.env
+ExecStart=/opt/triage/.venv/bin/python -m triage serve --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

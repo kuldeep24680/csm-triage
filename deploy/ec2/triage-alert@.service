@@ -1,0 +1,10 @@
+# Fired by OnFailure= of the run/watchdog units; %i is the failed unit name.
+[Unit]
+Description=Triage alert for %i
+
+[Service]
+Type=oneshot
+User=triage
+WorkingDirectory=/opt/triage/backend
+EnvironmentFile=/etc/triage/triage.env
+ExecStart=/opt/triage/.venv/bin/python -m triage alert "systemd unit %i failed - check: journalctl -u %i"

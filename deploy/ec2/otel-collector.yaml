@@ -1,0 +1,27 @@
+# OpenTelemetry Collector (otelcol-contrib) on the same EC2 host.
+# The app sends OTLP/HTTP to localhost:4318; the collector batches and forwards.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  batch: {}
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 256
+
+exporters:
+  # Grafana Cloud (or any OTLP backend). Set GRAFANA_OTLP_ENDPOINT / GRAFANA_OTLP_AUTH in the collector's env.
+  otlphttp/grafana:
+    endpoint: ${env:GRAFANA_OTLP_ENDPOINT}
+    headers:
+      Authorization: Basic ${env:GRAFANA_OTLP_AUTH}
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:  { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp/grafana] }
+    metrics: { receivers: [otlp], processors: [memory_limiter, batch], exporters: [otlphttp/grafana] }

@@ -1,0 +1,9 @@
+[Unit]
+Description=Triage watchdog before the working day
+
+[Timer]
+OnCalendar=*-*-* 06:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

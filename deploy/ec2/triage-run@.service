@@ -1,0 +1,14 @@
+# One nightly agent run for one tenant: systemctl start triage-run@northwind
+[Unit]
+Description=Triage nightly agent run (%i)
+OnFailure=triage-alert@%n.service
+
+[Service]
+Type=oneshot
+User=triage
+WorkingDirectory=/opt/triage/backend
+EnvironmentFile=/etc/triage/triage.env
+# flock: never two runs for the same tenant on this host (the DB advisory lock is the second guard).
+# The run itself retries once automatically from the failed step; a non-zero exit after that fires OnFailure.
+ExecStart=/usr/bin/flock -n /run/lock/triage-%i.lock /opt/triage/.venv/bin/python -m triage run --tenant %i --trigger schedule
+TimeoutStartSec=2h

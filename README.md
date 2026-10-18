@@ -102,6 +102,15 @@ Without an OpenAI key, briefs come from a deterministic template writer: same fa
 
 ---
 
+## Operations: scheduling, recovery, observability
+
+- **Nightly runs** per tenant via systemd timers on a single EC2 host ([`deploy/ec2/`](deploy/ec2/README.md)).
+- **Recovery:** heartbeat after every step and brief batch; a failed run is **retried automatically once** from the failed step; dead runs are marked `abandoned`; a morning watchdog starts any missing run. After that, **CS managers** can **Resume** (or **Run now**) from the Agent runs page; CSMs can't.
+- **Alerts:** Slack-compatible webhook (`TRIAGE_ALERT_WEBHOOK_URL`) for failed, partial, abandoned or missing runs.
+- **OpenTelemetry:** traces (API requests, every DB query, each run step, each LLM call), metrics (API rate/errors/latency, run/step durations, LLM tokens, briefs), exported over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+- **Logs:** every line carries `trace_id`, `request_id`, `tenant`, `user_name`, `run_id` (`TRIAGE_LOG_FORMAT=json` for JSON).
+- **User complaints:** `/api/audit/requests?user_name=…` → `trace_id` → the full trace and log lines.
+
 ## What breaks at 10× (and what I'd do)
 
 | Breaks first | Why | Fix |

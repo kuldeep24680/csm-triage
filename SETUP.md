@@ -114,6 +114,12 @@ Next, follow [USER_FLOW.md](USER_FLOW.md) to validate the app.
 
 Cost: about 50 briefs for Quill and about 300 for Northwind per run, so a few cents with gpt-4o-mini.
 
+## Updating after a pull
+```bash
+.venv/bin/pip install -q -r backend/requirements.txt   # new packages (e.g. OpenTelemetry)
+make migrate                                            # new tables/columns, keeps data
+```
+
 ## 9. Everyday commands
 
 | Task | Command |

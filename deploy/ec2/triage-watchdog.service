@@ -1,0 +1,10 @@
+[Unit]
+Description=Triage morning watchdog (stuck runs, missing runs)
+OnFailure=triage-alert@%n.service
+
+[Service]
+Type=oneshot
+User=triage
+WorkingDirectory=/opt/triage/backend
+EnvironmentFile=/etc/triage/triage.env
+ExecStart=/opt/triage/.venv/bin/python -m triage watchdog
