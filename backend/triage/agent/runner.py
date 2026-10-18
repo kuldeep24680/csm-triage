@@ -386,15 +386,37 @@ def _execute(run: Run):
     call = call[: settings.llm_max_accounts_per_run]
     writer = get_writer()
     template = TemplateWriter()
+    # Slice the source frames once for the call list, instead of scanning every
+    # ticket/email/billing row of the tenant for each account.
+    views = _account_views(fr, [r["account_id"] for r in call], as_of)
 
-    def _brief(r):
+    def _facts(r):
         a = acc.loc[r["account_id"]]
         info = dict(account_id=r["account_id"], name=a["name"], segment=a["segment"], arr=float(a["arr"] or 0),
                     next_renewal=str(a["next_renewal"]), days_to_renewal=int(a["days_to_renewal"]))
         score = dict(p_churn=r["p_churn"], rank_in_book=r["rank_in_book"], run_id=str(run.run_id))
         facts = grounding.build_facts(info, score, r["drivers"], [c for c in r["changes"] if c["kind"] != "first_seen"],
-                                      recent_events(fr, r["account_id"], as_of))
+                                      recent_events(views[r["account_id"]], r["account_id"], as_of))
         csm = users.get(r["owner_id"], "Your CSM")
+        return info, facts, csm, grounding.fingerprint(facts, csm, writer.name)
+
+    def _reuse(prev, facts):
+        """Previous brief, if the facts behind it are unchanged and it still validates against today's facts."""
+        if not prev or (prev.get("meta") or {}).get("error") or not prev.get("email"):
+            return None
+        out, dropped = grounding.validate({"summary": prev["summary"], "talking_points": prev["talking_points"],
+                                           "email": prev["email"]}, facts)
+        if dropped or not out["summary"] or not out["talking_points"] or not out["email"]:
+            return None   # something it said is no longer supported: write a fresh one
+        return out
+
+    def _brief(r, prev, pre=None):
+        info, facts, csm, fp = pre or _facts(r)
+        to = _primary_contact(views[r["account_id"]], r["account_id"], as_of)
+        reused = _reuse(prev, facts)
+        if reused is not None:
+            record("briefs", 1, tenant=t, generator=prev["generator"], reused=True)
+            return r, info, facts, reused, [], prev["generator"], {"reused_from_run": str(prev["run_id"])}, to, fp
         meta, gen, failure = {}, writer.name, None
         try:
             raw = writer.write(info, csm, facts)
@@ -413,24 +435,31 @@ def _execute(run: Run):
                 "body": f"Hi,\n\nCould we find time for a quick call soon to catch up?\n\nBest,\n{csm.split()[0]}"}
             if gen != template.name:
                 gen = f"{gen}+template"
-        to = _primary_contact(fr, r["account_id"], as_of)
-        record("briefs", 1, tenant=t, generator=gen)
+        record("briefs", 1, tenant=t, generator=gen, reused=False)
         if dropped:
             record("claims_removed", len(dropped), tenant=t)
-        return r, info, facts, out, dropped, gen, {**meta, "error": failure} if failure else meta, to
+        return r, info, facts, out, dropped, gen, {**meta, "error": failure} if failure else meta, to, fp
 
     def _persist_batch(results):
         with tenant_tx(t) as conn:
             recently_approved = {r["account_id"] for r in conn.execute(
                 "SELECT DISTINCT account_id FROM outreach_drafts WHERE status='approved' AND decided_at > now() - interval '14 days'")}
+            last_draft = {r["account_id"]: r for r in conn.execute(
+                """SELECT DISTINCT ON (account_id) account_id, status, subject, body FROM outreach_drafts
+                   WHERE account_id = ANY(%s) AND status <> 'superseded' ORDER BY account_id, created_at DESC""",
+                ([x[0]["account_id"] for x in results],))}
             briefs, drafts = [], []
-            for r, info, facts, out, dropped, gen, meta, to in results:
+            for r, info, facts, out, dropped, gen, meta, to, fp in results:
                 briefs.append(dict(tenant_id=t, run_id=run.run_id, account_id=r["account_id"], generator=gen,
                                    summary=out["summary"], talking_points=json.dumps(out["talking_points"]),
                                    facts=json.dumps(facts, default=str), dropped_claims=json.dumps(dropped),
-                                   meta=json.dumps(meta, default=str)))
+                                   meta=json.dumps(meta, default=str), facts_hash=fp, email=json.dumps(out["email"])))
                 if r["account_id"] in recently_approved:
                     continue
+                ld = last_draft.get(r["account_id"])
+                if "reused_from_run" in meta and ld and (ld["status"] == "pending" or
+                                                         (ld["subject"], ld["body"]) == (out["email"]["subject"], out["email"]["body"])):
+                    continue   # nothing new to say: keep the pending draft / don't re-propose one the CSM already decided
                 drafts.append(dict(draft_id=uuid.uuid4(), tenant_id=t, run_id=run.run_id, account_id=r["account_id"],
                                    to_email=to, subject=out["email"]["subject"], body=out["email"]["body"]))
             ids = [d["account_id"] for d in drafts]
@@ -444,16 +473,37 @@ def _execute(run: Run):
         # skips every account that already has a brief for this run.
         with tenant_tx(t) as conn:
             have = {r["account_id"] for r in conn.execute("SELECT account_id FROM briefs WHERE run_id=%s", (run.run_id,))}
+            prev = {}
+            if settings.reuse_briefs:
+                # latest brief per (account, fingerprint) from the last two weeks of runs
+                for r in conn.execute(
+                        """SELECT DISTINCT ON (b.account_id, b.facts_hash) b.account_id, b.run_id, b.generator,
+                                  b.summary, b.talking_points, b.email, b.meta, b.facts_hash
+                           FROM briefs b JOIN agent_runs r USING (run_id)
+                           WHERE b.account_id = ANY(%s) AND b.run_id <> %s AND b.facts_hash IS NOT NULL
+                             AND r.as_of BETWEEN %s AND %s
+                           ORDER BY b.account_id, b.facts_hash, r.as_of DESC, r.started_at DESC""",
+                        ([r["account_id"] for r in call], run.run_id, as_of - timedelta(days=14), as_of)):
+                    prev[(r["account_id"], r["facts_hash"])] = r
         todo = [r for r in call if r["account_id"] not in have]
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        reused = 0
+
+        def _one(r):
+            pre = _facts(r)
+            return _brief(r, prev.get((r["account_id"], pre[3])), pre)
+
+        with ThreadPoolExecutor(max_workers=settings.llm_concurrency) as ex:
             for i in range(0, len(todo), BRIEF_BATCH):
                 chunk = todo[i:i + BRIEF_BATCH]
                 # copy_context per task carries the trace + run/tenant ids into worker threads
-                futures = [ex.submit(contextvars.copy_context().run, _brief, r) for r in chunk]
-                _persist_batch([f.result() for f in futures])
+                futures = [ex.submit(contextvars.copy_context().run, _one, r) for r in chunk]
+                results = [f.result() for f in futures]
+                reused += sum(1 for x in results if "reused_from_run" in x[6])
+                _persist_batch(results)
                 run.stats["briefs_written"] = len(have) + i + len(chunk)
                 run.beat()
-        return {"reused": len(have), "written": len(todo)}
+        run.stats["briefs_reused"] = reused
+        return {"reused": len(have), "written": len(todo), "reused_unchanged": reused}
     progress = run.step("briefs", _briefs)
 
     with tenant_tx(t) as conn:
@@ -465,6 +515,24 @@ def _execute(run: Run):
         nd = conn.execute("SELECT count(*) AS n FROM outreach_drafts WHERE run_id=%s", (run.run_id,)).fetchone()["n"]
     run.stats.update(briefs=agg["n"], drafts=nd, brief_generators=gens, brief_failures=agg["failures"],
                      dropped_claims=int(agg["dropped"]), briefs_reused_on_resume=(progress or {}).get("reused", 0))
+
+
+def _account_views(fr, account_ids: list[str], as_of: date) -> dict:
+    """Per-account slices of the source frames that briefs read (recent windows only)."""
+    from types import SimpleNamespace
+    T = pd.Timestamp(as_of).tz_localize("UTC")
+    ids = set(account_ids)
+
+    def split(df, mask):
+        sub = df[mask & df["account_id"].isin(ids)]
+        groups = {k: g for k, g in sub.groupby("account_id")}
+        return lambda a: groups.get(a, sub.iloc[0:0])
+    tk = split(fr.tickets, (fr.tickets["created_at"] >= T - pd.Timedelta(days=90)))
+    em = split(fr.emails, (fr.emails["sent_at"] >= T - pd.Timedelta(days=60)))
+    bl = split(fr.billing, (fr.billing["occurred_at"] >= T - pd.Timedelta(days=120)))
+    ct = split(fr.contacts, fr.contacts["arrived_at"] <= T)
+    return {a: SimpleNamespace(tickets=tk(a), emails=em(a), billing=bl(a), contacts=ct(a),
+                               ticket_subjects=fr.ticket_subjects) for a in ids}
 
 
 def _primary_contact(fr, account_id: str, as_of: date) -> str | None:

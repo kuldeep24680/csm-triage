@@ -244,31 +244,46 @@ def account(account_id: str, run_id: str | None = None, user: User = Depends(cur
             "timeline": timeline}
 
 
+def _linked(conn, account_id: str) -> dict:
+    """External ids linked to this account, per source (used to fetch source rows by index)."""
+    out = {"zendesk_org": [], "email_address": [], "stripe_customer": [], "product_workspace": []}
+    for r in conn.execute("SELECT source, external_id FROM identity_links WHERE account_id=%s", (account_id,)):
+        out.setdefault(r["source"], []).append(r["external_id"])
+    return out
+
+
+# A ticket belongs to the account its Zendesk org resolves to; only if the org is
+# unresolved does the requester's email decide (same rule as feature building).
+_TICKETS_FOR_ACCOUNT = """
+    SELECT {cols} FROM tickets t
+    WHERE t.org_id = ANY(%(orgs)s) AND t.created_at >= %(since)s AND t.created_at < %(until)s
+    UNION ALL
+    SELECT {cols} FROM tickets t
+    WHERE t.requester_email = ANY(%(emails)s) AND t.created_at >= %(since)s AND t.created_at < %(until)s
+      AND NOT EXISTS (SELECT 1 FROM identity_links lo WHERE lo.source='zendesk_org'
+                      AND lo.external_id = t.org_id AND lo.account_id IS NOT NULL)"""
+
+
 def _timeline(conn, account_id: str, as_of: date, days: int = 120) -> list[dict]:
     since = as_of - timedelta(days=days)
+    ln = _linked(conn, account_id)
     ev = []
-    for r in conn.execute("""
-            SELECT t.ticket_id, t.subject, t.priority, t.category, t.created_at, t.solved_at, t.csat
-            FROM tickets t
-            LEFT JOIN identity_links lo ON lo.source='zendesk_org' AND lo.external_id=t.org_id
-            LEFT JOIN identity_links le ON le.source='email_address' AND le.external_id=t.requester_email
-            WHERE COALESCE(lo.account_id, le.account_id)=%s AND t.created_at >= %s AND t.created_at < %s""",
-                          (account_id, since, as_of)):
+    for r in conn.execute(_TICKETS_FOR_ACCOUNT.format(
+            cols="t.ticket_id, t.subject, t.priority, t.category, t.created_at, t.solved_at, t.csat"),
+            {"orgs": ln["zendesk_org"], "emails": ln["email_address"], "since": since, "until": as_of}):
         ev.append({"at": r["created_at"], "source": "zendesk", "kind": "ticket",
                    "title": r["subject"], "detail": f"{r['priority']} priority, {r['category'].replace('_', ' ')}"
                    + (", solved" if r["solved_at"] else ", open") + (f", CSAT {r['csat']}" if r["csat"] else ""),
                    "ref": r["ticket_id"]})
     for r in conn.execute("""
             SELECT e.message_id, e.direction, e.counterpart, e.subject, e.snippet, e.sent_at FROM emails e
-            JOIN identity_links l ON l.source='email_address' AND l.external_id=e.counterpart
-            WHERE l.account_id=%s AND e.sent_at >= %s AND e.sent_at < %s""", (account_id, since, as_of)):
+            WHERE e.counterpart = ANY(%s) AND e.sent_at >= %s AND e.sent_at < %s""", (ln["email_address"], since, as_of)):
         ev.append({"at": r["sent_at"], "source": "gmail", "kind": f"email_{r['direction']}",
                    "title": r["subject"], "detail": r["snippet"], "who": r["counterpart"], "ref": r["message_id"]})
     for r in conn.execute("""
             SELECT b.event_id, b.event_type, b.occurred_at, b.amount_cents, b.quantity, b.prev_quantity FROM billing_events b
-            JOIN identity_links l ON l.source='stripe_customer' AND l.external_id=b.customer_id
-            WHERE l.account_id=%s AND b.occurred_at >= %s AND b.occurred_at < %s
-              AND b.event_type <> 'invoice.paid'""", (account_id, since, as_of)):
+            WHERE b.customer_id = ANY(%s) AND b.occurred_at >= %s AND b.occurred_at < %s
+              AND b.event_type <> 'invoice.paid'""", (ln["stripe_customer"], since, as_of)):
         detail = (f"${(r['amount_cents'] or 0) / 100:,.0f}" if r["amount_cents"] else
                   f"seats {r['prev_quantity']} → {r['quantity']}" if r["prev_quantity"] else "")
         ev.append({"at": r["occurred_at"], "source": "stripe", "kind": r["event_type"], "title": r["event_type"],
@@ -303,39 +318,38 @@ def evidence(account_id: str, feature: str, run_id: str | None = None, user: Use
             raise HTTPException(404, "account not found")
         run = _latest_run(conn, run_id)
         T = run["as_of"]
+        ln = _linked(conn, account_id)
         if group == "usage":
             rows = conn.execute("""
                 SELECT u.workspace_id, u.week_start, u.active_users, u.sessions, u.f_automations, u.schema_version,
                        u.arrived_at, (u.arrived_at <= %s) AS visible_to_run
-                FROM usage_weekly u JOIN identity_links l ON l.source='product_workspace' AND l.external_id=u.workspace_id
-                WHERE l.account_id=%s AND u.week_start >= %s AND u.week_start + 7 <= %s
-                ORDER BY u.week_start DESC""", (T, account_id, T - timedelta(days=91), T)).fetchall()
+                FROM usage_weekly u
+                WHERE u.workspace_id = ANY(%s) AND u.week_start >= %s AND u.week_start + 7 <= %s
+                ORDER BY u.week_start DESC""", (T, ln["product_workspace"], T - timedelta(days=91), T)).fetchall()
             window = "last 12 complete weeks"
         elif group == "tickets":
-            rows = conn.execute("""
-                SELECT t.ticket_id, t.subject, t.priority, t.category, t.created_at, t.solved_at, t.csat,
-                       t.created_arrived_at AS arrived_at, (t.created_arrived_at <= %s) AS visible_to_run
-                FROM tickets t
-                LEFT JOIN identity_links lo ON lo.source='zendesk_org' AND lo.external_id=t.org_id
-                LEFT JOIN identity_links le ON le.source='email_address' AND le.external_id=t.requester_email
-                WHERE COALESCE(lo.account_id, le.account_id)=%s AND t.created_at >= %s AND t.created_at < %s
-                ORDER BY t.created_at DESC""", (T, account_id, T - timedelta(days=90), T)).fetchall()
+            rows = conn.execute(_TICKETS_FOR_ACCOUNT.format(
+                cols="t.ticket_id, t.subject, t.priority, t.category, t.created_at, t.solved_at, t.csat, "
+                     "t.created_arrived_at AS arrived_at, (t.created_arrived_at <= %(T)s) AS visible_to_run")
+                + " ORDER BY created_at DESC",
+                {"orgs": ln["zendesk_org"], "emails": ln["email_address"], "T": T,
+                 "since": T - timedelta(days=90), "until": T}).fetchall()
             window = "tickets created in the 90 days before the run"
         elif group == "emails":
             rows = conn.execute("""
                 SELECT e.message_id, e.direction, e.counterpart, e.subject, e.snippet, e.sent_at, e.arrived_at,
                        (e.arrived_at <= %s) AS visible_to_run
-                FROM emails e JOIN identity_links l ON l.source='email_address' AND l.external_id=e.counterpart
-                WHERE l.account_id=%s AND e.sent_at >= %s AND e.sent_at < %s
-                ORDER BY e.sent_at DESC LIMIT 200""", (T, account_id, T - timedelta(days=365), T)).fetchall()
+                FROM emails e
+                WHERE e.counterpart = ANY(%s) AND e.sent_at >= %s AND e.sent_at < %s
+                ORDER BY e.sent_at DESC LIMIT 200""", (T, ln["email_address"], T - timedelta(days=365), T)).fetchall()
             window = "emails in the 365 days before the run (30/90-day features use the newest part)"
         elif group == "billing":
             rows = conn.execute("""
                 SELECT b.event_id, b.event_type, b.occurred_at, b.amount_cents, b.quantity, b.prev_quantity,
                        b.arrived_at, (b.arrived_at <= %s) AS visible_to_run
-                FROM billing_events b JOIN identity_links l ON l.source='stripe_customer' AND l.external_id=b.customer_id
-                WHERE l.account_id=%s AND b.occurred_at >= %s AND b.occurred_at < %s
-                ORDER BY b.occurred_at DESC""", (T, account_id, T - timedelta(days=180), T)).fetchall()
+                FROM billing_events b
+                WHERE b.customer_id = ANY(%s) AND b.occurred_at >= %s AND b.occurred_at < %s
+                ORDER BY b.occurred_at DESC""", (T, ln["stripe_customer"], T - timedelta(days=180), T)).fetchall()
             window = "billing events in the 180 days before the run"
         else:
             rows = conn.execute("""

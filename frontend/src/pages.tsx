@@ -182,6 +182,7 @@ export function AccountPage() {
               </ol>
               <p className="generator">
                 Written by {brief.generator} from the facts below, for the run on {fmtDate(brief.as_of)}.
+                {brief.meta?.reused_from_run && <> Nothing material changed since the last run, so the earlier brief was re-checked against today's facts and kept.</>}
                 {brief.dropped_claims?.length > 0 && <> {brief.dropped_claims.length} claim(s) were removed because the data didn't support them.</>}
               </p>
               <details>
@@ -378,7 +379,7 @@ export function RunsPage() {
                       <td>{r.attempts}{r.last_resumed_at ? <span className="small muted"> (resumed)</span> : null}</td>
                       <td>{secs.toFixed(1)}s</td><td>{st.accounts_scored ?? "–"}</td>
                       <td>{st.bands ? `${st.bands.call ?? 0} / ${st.bands.watch ?? 0} / ${st.bands.unknown ?? 0}` : "–"}</td>
-                      <td>{st.briefs ?? st.briefs_written ?? "–"} <span className="muted small">{Object.keys(st.brief_generators || {}).join(", ")}</span></td>
+                      <td>{st.briefs ?? st.briefs_written ?? "–"}{st.briefs_reused ? <span className="muted small"> ({st.briefs_reused} reused)</span> : null} <span className="muted small">{Object.keys(st.brief_generators || {}).join(", ")}</span></td>
                       <td>{st.dropped_claims ?? 0}</td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         {canResume && <button className="btn" disabled={busy || running} onClick={() => act(`/runs/${r.run_id}/resume`, "Resuming from the failed step.")}>Resume</button>}{" "}

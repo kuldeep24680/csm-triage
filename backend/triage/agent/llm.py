@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 from ..config import settings
@@ -28,6 +29,8 @@ Return JSON with exactly these keys:
 Rules:
 - 2 to 4 talking points. Each must cite the fact/event ids it relies on.
 - Every number you write must appear in the cited facts.
+- Refer to the renewal by its date, not by a count of days, and don't quote the risk percentage
+  or rank: those change every day, the rest of the brief should stay true until the facts change.
 - The email goes to the customer after the CSM reviews it. It must be warm, short (<= 120 words),
   propose a call, reference something specific the customer raised if available, and must NOT
   mention risk, churn, scores, models, flags or internal data. Sign it with the CSM's first name.
@@ -41,22 +44,23 @@ def _user_prompt(acct: dict, csm_name: str, facts: list[dict]) -> str:
 
 
 class TemplateWriter:
-    name = "template-v1"
+    name = "template-v2"
 
     def write(self, acct: dict, csm_name: str, facts: list[dict]) -> dict:
         drivers = [f for f in facts if f["kind"] == "driver"]
         changes = [f for f in facts if f["kind"] == "change"]
         events = [f for f in facts if f["kind"] == "event"]
-        score = next(f for f in facts if f["kind"] == "score")
         acc = next(f for f in facts if f["kind"] == "account")
         reasons = "; ".join(d["text"].rstrip(".") for d in drivers[:2]) or "a mix of weaker signals"
-        summary = f"{score['text']} Main reasons: {reasons}."
+        # No score, rank or day counts in the text: they change daily, and the score is shown next to the brief anyway.
+        summary = f"Main reasons this account needs attention: {reasons}."
         points = [{"text": f"Ask about: {d['text']}", "cites": [d["id"]]} for d in drivers[:2]]
         if changes:
             points.append({"text": f"Since last week: {changes[0]['text']}", "cites": [changes[0]["id"]]})
         if events:
             points.append({"text": f"Reference: {events[0]['text']}", "cites": [events[0]["id"]]})
-        points.append({"text": f"Confirm renewal plans: {acc['text']}", "cites": [acc["id"]]})
+        renewal = re.sub(r" \(\d+ days away\)", "", acc["text"])
+        points.append({"text": f"Confirm renewal plans: {renewal}", "cites": [acc["id"]]})
         first = csm_name.split()[0]
         topic = None
         for e in events:

@@ -109,3 +109,21 @@ def validate(output: dict, facts: list[dict]) -> tuple[dict, list[dict]]:
 
 def fmt_date(d) -> str:
     return d.isoformat() if isinstance(d, date) else str(d)[:10]
+
+
+# Parts of the facts that drift every day without the story changing: the
+# day count to renewal, today's score and rank, and week-over-week changes.
+_DAYS_AWAY = re.compile(r"\s*\(\d+ days away\)")
+_VOLATILE_KINDS = {"score", "change"}
+
+
+def fingerprint(facts: list[dict], csm: str, generator: str) -> str:
+    """Hash of what a brief is *about*. Same fingerprint on the next run ->
+    the previous brief can be reused (it is still re-validated against the new facts)."""
+    import hashlib
+    import json
+    stable = [(f["id"], _DAYS_AWAY.sub("", f["text"])) for f in facts if f["kind"] not in _VOLATILE_KINDS]
+    # Which things changed since the last run (not their wording) is part of the story:
+    # a brief written before a new change can't be reused once the change shows up.
+    changed = sorted(f["ref"]["change"] for f in facts if f["kind"] == "change" and f["ref"]["change"] != "risk")
+    return hashlib.sha256(json.dumps([generator, csm, stable, changed]).encode()).hexdigest()[:32]

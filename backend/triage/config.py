@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     llm_timeout_s: float = 30.0
     llm_max_accounts_per_run: int = 400   # cost guard: briefs only for the call list
+    llm_concurrency: int = 16             # parallel LLM calls per run (gpt-4o-mini rate limits allow far more)
+    reuse_briefs: bool = True             # reuse last run's brief when the account's facts haven't changed
 
     static_dir: Path = REPO_ROOT / "frontend" / "dist"
 

@@ -117,3 +117,31 @@ def test_run_steps_keep_pipeline_order_on_resume():
     assert r.done == {"persist_scores"}
     r._set_step({"step": "ingest", "status": "ok"})
     assert [s["step"] for s in r.steps] == ["ingest", "persist_scores"]
+
+
+def test_brief_fingerprint_ignores_daily_drift_but_not_new_facts():
+    base = [{"id": "F1", "kind": "account", "text": "Acme, ARR $50,000, renewal on 2026-11-20 (35 days away).", "ref": None},
+            {"id": "F2", "kind": "score", "text": "Estimated renewal risk 41% (ranked #3).", "ref": None},
+            {"id": "F3", "kind": "driver", "text": "high/urgent tickets in the last 90 days: 4.", "ref": None}]
+    tomorrow = [dict(base[0], text="Acme, ARR $50,000, renewal on 2026-11-20 (34 days away)."),
+                dict(base[1], text="Estimated renewal risk 44% (ranked #2)."), base[2]]
+    new_ticket = [base[0], base[1], dict(base[2], text="high/urgent tickets in the last 90 days: 5.")]
+    with_change = base + [{"id": "F4", "kind": "change", "text": "1 new high/urgent support ticket(s)",
+                           "ref": {"change": "feature:urgent_tickets_90d"}}]
+    fp = grounding.fingerprint(base, "Sam Lee", "openai:gpt-4o-mini")
+    assert fp == grounding.fingerprint(tomorrow, "Sam Lee", "openai:gpt-4o-mini")
+    assert fp != grounding.fingerprint(new_ticket, "Sam Lee", "openai:gpt-4o-mini")
+    assert fp != grounding.fingerprint(with_change, "Sam Lee", "openai:gpt-4o-mini")
+    assert fp != grounding.fingerprint(base, "Sam Lee", "template-v2")
+
+
+def test_template_brief_survives_a_day_of_drift():
+    """A reused brief is re-validated against tomorrow's facts: the template must not quote day counts or scores."""
+    from triage.agent.llm import TemplateWriter
+    facts = [{"id": "F1", "kind": "account", "text": "Acme (SMB), ARR $50,000, renewal on 2026-11-20 (35 days away).", "ref": None},
+             {"id": "F2", "kind": "score", "text": "Estimated renewal risk 41% (ranked #3 in the CSM's book this week).", "ref": None},
+             {"id": "F3", "kind": "driver", "text": "high/urgent tickets in the last 90 days: 4.", "ref": None}]
+    out, dropped = grounding.validate(TemplateWriter().write({"name": "Acme"}, "Sam Lee", facts), facts)
+    tomorrow = [dict(facts[0], text=facts[0]["text"].replace("35", "34")), dict(facts[1], text="Estimated renewal risk 44%."), facts[2]]
+    again, dropped2 = grounding.validate(out, tomorrow)
+    assert not dropped and not dropped2 and again["email"] and len(again["talking_points"]) == len(out["talking_points"])
