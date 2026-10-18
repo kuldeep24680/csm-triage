@@ -14,6 +14,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -21,9 +22,11 @@ from pydantic import BaseModel
 from ..config import settings
 from ..db import system_tx, tenant_tx
 from ..features.build import FEATURES
+from ..observability import setup as setup_telemetry
 from .audit import audit_middleware, start_writer, stop_writer
 from .auth import User, current_user, login
 
+setup_telemetry("triage-api")
 log = logging.getLogger("triage.api")
 
 TAGS = [
@@ -50,6 +53,9 @@ app = FastAPI(
     docs_url="/api/docs", redoc_url="/api/redoc", openapi_url="/api/openapi.json",
 )
 app.middleware("http")(audit_middleware)
+# Added after the audit middleware so it wraps it: the server span exists when we audit,
+# and its trace_id is stored with the request.
+FastAPIInstrumentor.instrument_app(app, excluded_urls="api/health")
 
 
 @app.on_event("startup")
@@ -122,7 +128,12 @@ def health():
         model = conn.execute("SELECT model_version, created_at FROM models WHERE is_active").fetchone()
         runs = conn.execute("""SELECT DISTINCT ON (tenant_id) tenant_id, as_of, status, finished_at
                                FROM agent_runs ORDER BY tenant_id, started_at DESC""").fetchall()
-    return {"ok": True, "model": model, "last_runs": runs}
+        ok = conn.execute("""SELECT tenant_id, max(finished_at) AS last_success,
+                                    round(extract(epoch FROM now() - max(finished_at)) / 3600) AS hours_ago
+                             FROM agent_runs WHERE status IN ('succeeded','partial') GROUP BY 1""").fetchall()
+        stuck = conn.execute("""SELECT count(*) AS n FROM agent_runs WHERE status = 'running'
+                                AND heartbeat_at < now() - interval '15 minutes'""").fetchone()["n"]
+    return {"ok": True, "model": model, "last_runs": runs, "last_success": ok, "stuck_runs": stuck}
 
 
 # ---------------------------------------------------------------- the app
@@ -381,7 +392,63 @@ def reject(draft_id: uuid.UUID, body: DraftDecision, user: User = Depends(curren
 def runs(user: User = Depends(current_user)):
     with tenant_tx(user.tenant_id) as conn:
         return conn.execute("""SELECT run_id, as_of, trigger, status, started_at, finished_at, model_version,
-                                      steps, stats, error FROM agent_runs ORDER BY started_at DESC LIMIT 50""").fetchall()
+                                      steps, stats, error, heartbeat_at, attempts, last_resumed_at,
+                                      (status = 'running' AND heartbeat_at < now() - interval '15 minutes') AS stale
+                               FROM agent_runs ORDER BY started_at DESC LIMIT 50""").fetchall()
+
+
+def _require_manager(user: User):
+    if user.role != "manager":
+        raise HTTPException(403, "only CS managers can start or resume agent runs")
+
+
+def _background(target, *args):
+    """Single-server setup: run the job in a background thread of the API process.
+    The per-tenant database lock still prevents overlap with the scheduled run."""
+    import contextvars
+    import threading
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(target, *args), daemon=True, name="agent-run").start()
+
+
+class RunRequest(BaseModel):
+    as_of: date | None = None
+
+
+@app.post("/api/runs", tags=["agent & model"], status_code=202,
+          summary="Start an agent run now for your tenant (managers only)")
+def start_run(body: RunRequest, user: User = Depends(current_user)):
+    """Starts a fresh run in the background. Returns 409 if a run for this tenant is already in progress."""
+    _require_manager(user)
+    from ..agent.runner import run_all
+    as_of = body.as_of or (date.today() if settings.use_wall_clock else settings.sim_end_date)
+    with tenant_tx(user.tenant_id) as conn:
+        busy = conn.execute("""SELECT run_id FROM agent_runs WHERE status='running'
+                               AND heartbeat_at > now() - interval '15 minutes' LIMIT 1""").fetchone()
+        if busy:
+            raise HTTPException(409, f"a run is already in progress ({busy['run_id']})")
+        conn.execute("INSERT INTO audit_log (tenant_id, actor, action, detail) VALUES (%s, %s, 'run.start', %s)",
+                     (user.tenant_id, user.email, json.dumps({"as_of": str(as_of)})))
+    _background(run_all, as_of, user.tenant_id, "manual")
+    return {"status": "started", "tenant": user.tenant_id, "as_of": as_of}
+
+
+@app.post("/api/runs/{run_id}/resume", tags=["agent & model"], status_code=202,
+          summary="Resume a failed or abandoned run from its failed step (managers only)")
+def resume(run_id: uuid.UUID, user: User = Depends(current_user)):
+    """Completed steps (ingest, identity, stored scores) and briefs already written are skipped."""
+    _require_manager(user)
+    from ..agent.runner import resume_run
+    with tenant_tx(user.tenant_id) as conn:
+        r = conn.execute("SELECT status FROM agent_runs WHERE run_id=%s", (run_id,)).fetchone()
+        if not r:
+            raise HTTPException(404, "run not found")
+        if r["status"] not in ("failed", "abandoned"):
+            raise HTTPException(409, f"only failed or abandoned runs can be resumed (this one is {r['status']})")
+        conn.execute("""INSERT INTO audit_log (tenant_id, actor, action, entity) VALUES (%s, %s, 'run.resume', %s)""",
+                     (user.tenant_id, user.email, f"agent_runs:{run_id}"))
+    _background(resume_run, str(run_id))
+    return {"status": "resuming", "run_id": run_id}
 
 
 @app.get("/api/model", tags=["agent & model"], summary="Active model card and evaluation (this tenant's slice)")
@@ -450,28 +517,36 @@ def data_quality(user: User = Depends(current_user)):
 @app.get("/api/audit/requests", tags=["observability"],
          summary="API request audit log for this tenant (managers only)")
 def audit_requests(status: int | None = None, route: str | None = None, errors_only: bool = False,
+                   user_name: str | None = None, trace_id: str | None = None,
                    limit: int = 100, user: User = Depends(current_user)):
-    """Most recent requests first: endpoint, route template, status, latency, caller and
-    (redacted) headers. Filter by exact `status`, by `route` substring, or `errors_only` (>= 400)."""
+    """Most recent requests first: endpoint, route template, status, latency, caller (user_name,
+    email, role), trace_id and (redacted) headers. Filters: exact `status`, `route` substring,
+    `errors_only` (>= 400), `user_name` (name or email, substring) and exact `trace_id`.
+
+    Typical use: a user reports a problem -> filter by `user_name` -> copy the `trace_id`
+    -> open that trace in your tracing backend / grep the logs for it."""
     if user.role != "manager":
         raise HTTPException(403, "managers only")
     with tenant_tx(user.tenant_id) as conn:
         return conn.execute("""
-            SELECT request_id, at, method, path, route, query, status, latency_ms, response_bytes,
-                   user_email, role, client_ip, user_agent, request_headers, response_headers, error
+            SELECT request_id, trace_id, at, method, path, route, query, status, latency_ms, response_bytes,
+                   user_name, user_email, role, client_ip, user_agent, request_headers, response_headers, error
             FROM api_requests
             WHERE (%(s)s::int IS NULL OR status = %(s)s)
               AND (%(r)s::text IS NULL OR route ILIKE '%%' || %(r)s || '%%')
               AND (NOT %(e)s OR status >= 400)
+              AND (%(u)s::text IS NULL OR user_name ILIKE '%%' || %(u)s || '%%' OR user_email ILIKE '%%' || %(u)s || '%%')
+              AND (%(t)s::text IS NULL OR trace_id = %(t)s)
             ORDER BY at DESC LIMIT %(l)s""",
-                            {"s": status, "r": route, "e": errors_only, "l": min(max(limit, 1), 1000)}).fetchall()
+                            {"s": status, "r": route, "e": errors_only, "u": user_name, "t": trace_id,
+                             "l": min(max(limit, 1), 1000)}).fetchall()
 
 
 @app.get("/api/audit/summary", tags=["observability"],
          summary="Per-endpoint traffic, error rate and latency percentiles (managers only)")
-def audit_summary(hours: int = 24, user: User = Depends(current_user)):
-    """Grouped by route template over the last `hours`: request count, 4xx/5xx counts,
-    and p50 / p95 / max latency in milliseconds."""
+def audit_summary(hours: int = 24, user_name: str | None = None, user: User = Depends(current_user)):
+    """Grouped by route template over the last `hours` (optionally for one `user_name`):
+    request count, 4xx/5xx counts, and p50 / p95 / max latency in milliseconds."""
     if user.role != "manager":
         raise HTTPException(403, "managers only")
     with tenant_tx(user.tenant_id) as conn:
@@ -483,7 +558,9 @@ def audit_summary(hours: int = 24, user: User = Depends(current_user)):
                    round(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)::numeric, 1) AS p95_ms,
                    round(max(latency_ms)::numeric, 1) AS max_ms
             FROM api_requests WHERE at > now() - make_interval(hours => %s)
-            GROUP BY 1, 2 ORDER BY requests DESC""", (min(max(hours, 1), 24 * 30),)).fetchall()
+              AND (%s::text IS NULL OR user_name ILIKE '%%' || %s || '%%' OR user_email ILIKE '%%' || %s || '%%')
+            GROUP BY 1, 2 ORDER BY requests DESC""",
+                            (min(max(hours, 1), 24 * 30), user_name, user_name, user_name)).fetchall()
 
 
 # --------------------------------------------------------- SPA static files

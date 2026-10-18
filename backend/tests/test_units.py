@@ -94,3 +94,26 @@ def test_audit_redacts_sensitive_headers():
     out = redact_headers({"Authorization": "Bearer secret-token", "Cookie": "s=1", "User-Agent": "curl/8"})
     assert out["authorization"].startswith("Bearer <redacted:") and "secret-token" not in out["authorization"]
     assert out["cookie"] == "<redacted>" and out["user-agent"] == "curl/8"
+
+
+def test_json_logs_carry_trace_and_user_context():
+    import json as _json
+    import logging
+    from triage.observability import _ContextFilter, _JsonFormatter, tracer, user_name_var
+    rec = logging.LogRecord("t", logging.INFO, __file__, 1, "hello", None, None)
+    tok = user_name_var.set("Chloe Murphy")
+    with tracer.start_as_current_span("x"):
+        _ContextFilter().filter(rec)
+    user_name_var.reset(tok)
+    out = _json.loads(_JsonFormatter().format(rec))
+    assert out["user_name"] == "Chloe Murphy" and len(out["trace_id"]) == 32
+
+
+def test_run_steps_keep_pipeline_order_on_resume():
+    from datetime import date
+    from triage.agent.runner import Run
+    r = Run("t", date(2026, 1, 1), "manual", prior_steps=[{"step": "persist_scores", "status": "ok"},
+                                                          {"step": "briefs", "status": "failed"}])
+    assert r.done == {"persist_scores"}
+    r._set_step({"step": "ingest", "status": "ok"})
+    assert [s["step"] for s in r.steps] == ["ingest", "persist_scores"]

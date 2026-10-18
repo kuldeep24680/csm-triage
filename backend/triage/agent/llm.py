@@ -78,6 +78,21 @@ class OpenAIWriter:
         self.name = f"openai:{settings.openai_model}"
 
     def write(self, acct: dict, csm_name: str, facts: list[dict]) -> dict:
+        from ..observability import record, tenant_var, tracer
+        with tracer.start_as_current_span("llm.brief", attributes={
+                "gen_ai.system": "openai", "gen_ai.request.model": settings.openai_model,
+                "triage.account_id": acct["account_id"]}) as span:
+            out = self._write(acct, csm_name, facts)
+            m = out.get("_meta", {})
+            span.set_attribute("gen_ai.usage.input_tokens", m.get("prompt_tokens") or 0)
+            span.set_attribute("gen_ai.usage.output_tokens", m.get("completion_tokens") or 0)
+            for kind in ("prompt", "completion"):
+                if m.get(f"{kind}_tokens"):
+                    record("llm_tokens", m[f"{kind}_tokens"], tenant=tenant_var.get(), kind=kind,
+                           model=settings.openai_model)
+            return out
+
+    def _write(self, acct: dict, csm_name: str, facts: list[dict]) -> dict:
         t0 = time.time()
         resp = self.client.chat.completions.create(
             model=settings.openai_model, temperature=0.2,

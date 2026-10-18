@@ -5,9 +5,10 @@
 * Bodies are never stored. Sensitive headers are redacted before they leave
   the process. Authorization keeps only its scheme and a short fingerprint,
   so one user's calls can be correlated without storing the token.
-* Every response gets an ``X-Request-ID`` (echoed if the caller sent one) and
-  an ``X-Response-Time-ms`` header, so a user's bug report can be matched to
-  the exact audit row and server log line.
+* Every response gets ``X-Request-ID`` (echoed if the caller sent one),
+  ``X-Trace-ID`` and ``X-Response-Time-ms``. Each audit row stores the caller's
+  user_name and the trace_id, so "user X says the page was slow at 10:05" ->
+  filter by user_name -> trace_id -> the full trace and every log line.
 """
 from __future__ import annotations
 
@@ -23,8 +24,10 @@ from datetime import datetime, timezone
 
 import jwt
 from fastapi import Request
+from opentelemetry import trace
 
 from ..config import settings
+from ..observability import current_trace_id, record, request_id_var, tenant_var, user_name_var
 
 log = logging.getLogger("triage.api")
 
@@ -55,7 +58,8 @@ def _identity(request: Request) -> dict:
         return {}
     try:
         c = jwt.decode(auth[7:], settings.jwt_secret, algorithms=["HS256"])
-        return {"tenant_id": c.get("tenant"), "user_id": c.get("sub"), "user_email": c.get("email"), "role": c.get("role")}
+        return {"tenant_id": c.get("tenant"), "user_id": c.get("sub"), "user_email": c.get("email"),
+                "user_name": c.get("name"), "role": c.get("role")}
     except jwt.PyJWTError:
         return {}
 
@@ -64,6 +68,16 @@ async def audit_middleware(request: Request, call_next):
     if not request.url.path.startswith("/api"):
         return await call_next(request)
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    who = {"tenant_id": None, "user_id": None, "user_email": None, "user_name": None, "role": None,
+           **_identity(request)}
+    # Context for logs and spans: every log line in this request carries these.
+    tokens = [request_id_var.set(request_id), tenant_var.set(who["tenant_id"]), user_name_var.set(who["user_name"])]
+    span = trace.get_current_span()   # the server span opened by the OpenTelemetry FastAPI middleware
+    for k, v in (("triage.request_id", request_id), ("tenant.id", who["tenant_id"]),
+                 ("enduser.id", who["user_email"]), ("user.name", who["user_name"]), ("enduser.role", who["role"])):
+        if v:
+            span.set_attribute(k, v)
+    trace_id = current_trace_id()
     t0 = time.perf_counter()
     status, resp, error = 500, None, None
     try:
@@ -79,9 +93,10 @@ async def audit_middleware(request: Request, call_next):
         if resp is not None:
             resp.headers["X-Request-ID"] = request_id
             resp.headers["X-Response-Time-ms"] = str(ms)
+            if trace_id:
+                resp.headers["X-Trace-ID"] = trace_id
         rec = {
-            "request_id": request_id, "at": datetime.now(timezone.utc), **{
-                "tenant_id": None, "user_id": None, "user_email": None, "role": None, **_identity(request)},
+            "request_id": request_id, "at": datetime.now(timezone.utc), **who, "trace_id": trace_id,
             "method": request.method, "path": request.url.path, "route": route,
             "query": request.url.query or None, "status": status, "latency_ms": ms,
             "response_bytes": int(resp.headers.get("content-length", 0) or 0) if resp is not None else None,
@@ -91,15 +106,20 @@ async def audit_middleware(request: Request, call_next):
             "response_headers": json.dumps(redact_headers(resp.headers) if resp is not None else {}),
             "error": error,
         }
-        log.info("%s %s %s %.0fms req=%s tenant=%s", request.method, request.url.path, status, ms,
-                 request_id[:8], rec["tenant_id"])
+        log.info("%s %s %s %.0fms", request.method, request.url.path, status, ms)
+        attrs = {"method": request.method, "route": route or "unmatched", "status_class": f"{status // 100}xx",
+                 "tenant": who["tenant_id"]}
+        record("api_requests", 1, **attrs, user_name=who["user_name"])
+        record("api_latency", ms, **attrs)
+        for var, tok in zip((request_id_var, tenant_var, user_name_var), tokens):
+            var.reset(tok)
         try:
             _q.put_nowait(rec)
         except queue.Full:  # never let auditing take the API down
             log.warning("audit queue full; dropping record %s", request_id)
 
 
-COLS = ["request_id", "at", "tenant_id", "user_id", "user_email", "role", "method", "path", "route", "query",
+COLS = ["request_id", "at", "tenant_id", "user_id", "user_email", "user_name", "trace_id", "role", "method", "path", "route", "query",
         "status", "latency_ms", "response_bytes", "client_ip", "user_agent", "request_headers",
         "response_headers", "error"]
 
