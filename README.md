@@ -13,6 +13,8 @@ This README covers three things: **what I decided**, **what I deliberately skipp
 | [`project_context/Triage_Solution_Brief.pptx`](project_context/Triage_Solution_Brief.pptx) | Solution brief deck |
 | [`SETUP.md`](project_context/SETUP.md) · [`USER_FLOW.md`](project_context/USER_FLOW.md) | Run it locally · walk through it as a CSM |
 | [`project_context/DEPLOYMENT.md`](project_context/DEPLOYMENT.md) | Production deployment (Docker Compose on one server) |
+| [`CODE_WALKTHROUGH.md`](project_context/CODE_WALKTHROUGH.md) | Module-by-module tour of the code, with a debugging playbook |
+| [`ENTITIES.md`](project_context/ENTITIES.md) | Every Postgres table: purpose and what each row stores |
 
 ---
 
