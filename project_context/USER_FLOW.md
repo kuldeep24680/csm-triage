@@ -134,7 +134,8 @@ To find Orchid Freight or Summit Dental:
 - [ ] **CSM boundary.** Signed in as a CSM, paste the URL of an account from another CSM's book (copy it while signed in as the manager). You should get an error ("not in your book").
 - [ ] **Tenant boundary.** Signed in as `manager@helios.example`, paste a Northwind account URL. You should get "account not found".
 - [ ] **Model page boundary.** The Model page for Helios or Quill shows only that company's metrics, and no "two renewals we lost" section.
-- [ ] **Session expiry.** Signing out, or a token older than 12 hours, returns you to the sign-in page.
+- [ ] **Session renewal.** After 15 minutes the access token expires and is renewed silently (network tab: a 401, then `/api/auth/refresh` 200, then the retried call). You stay signed in for up to 12 hours.
+- [ ] **Session end.** Signing out, or a session older than 12 hours, returns you to the sign-in page; after signing out, `/api/auth/refresh` returns 401.
 
 ---
 

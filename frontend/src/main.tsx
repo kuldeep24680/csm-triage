@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
-import { api, getToken, setToken } from "./api";
+import { api, getToken, setToken, signOut } from "./api";
 import { AccountPage, CallListPage, DataQualityPage, ModelPage, RunsPage, TeamPage } from "./pages";
 import { Me, MeCtx } from "./ctx";
 import "./styles.css";
@@ -60,7 +60,7 @@ function Shell() {
   useEffect(() => { api<Me>("/me").then(setMe).catch((e) => setErr(e.message)); }, []);
   if (err) return <div className="main"><p className="error">Couldn't load your profile: {err}</p></div>;
   if (!me) return <div className="main muted">Loading…</div>;
-  const signOut = () => { setToken(null); nav("/login"); };
+  const doSignOut = async () => { await signOut(); nav("/login"); };
   return (
     <MeCtx.Provider value={me}>
       <div className="shell">
@@ -79,7 +79,7 @@ function Shell() {
           <div className="rail-foot">
             {me.user.name}
             <br />
-            <button onClick={signOut}>Sign out</button>
+            <button onClick={doSignOut}>Sign out</button>
           </div>
         </aside>
         <main className="main">

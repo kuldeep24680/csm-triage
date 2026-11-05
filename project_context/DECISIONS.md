@@ -60,6 +60,7 @@ One line of context per decision. Most of these are things a reviewer will ask a
 | T1 | `tenant_id` on every row + Postgres **row-level security**, `FORCE`d, via `SET LOCAL ROLE triage_app` + `app.tenant_id` | Isolation enforced by the database even if a query forgets a filter. Unset tenant → zero rows (fails closed) |
 | T2 | JWT carries the tenant; handlers can't choose it | |
 | T3 | Model metadata is filtered per tenant too (the model card hides other tenants' metrics) | Metrics are data |
+| T4 | 15-minute access token + rotating refresh token (httpOnly cookie, hash stored, reuse revokes the sign-in) | A stolen access token is useful for at most 15 minutes; sign-out and theft can be revoked server-side; page scripts can't read the refresh token. Rejected: a single 12-hour JWT (no revocation) |
 
 ## Operations
 

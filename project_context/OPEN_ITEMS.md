@@ -2,7 +2,7 @@
 
 The running list of what's left. When something is finished, move it to **Done** with the date and commit, so this file stays the single place to check status.
 
-_Last updated: 2026-10-18_
+_Last updated: 2026-11-05_
 
 ## Open
 
@@ -26,6 +26,7 @@ _Last updated: 2026-10-18_
 
 | Date | Item | How |
 |---|---|---|
+| 2026-11-05 | Short-lived sessions | Access token 12 h → **15 min**; rotating refresh token in an httpOnly cookie (sha256 stored, migration `006_refresh_tokens.sql`), reuse detection revokes the sign-in, server-side sign-out; the web app renews silently on 401 (single-flight). 6 new tests; checked in a browser |
 | 2026-10-18 | Full Docker stack validated end to end | `docker compose up` of the real compose file (db, api, scheduler, caddy) + `bootstrap`; 50 API checks and a 26-step browser walkthrough through Caddy (CSM + manager, every page, evidence, approve/reject, Open in Gmail, Run now/409/Resume, cross-tenant isolation, audit by user/trace, mobile), scheduler firing a `schedule` run, watchdog, backup/restore, down/up persistence. Peak memory of the largest nightly run ~600 MB |
 | 2026-10-18 | Production hardening | Refuses weak secrets in production; sign-in throttling; demo password hidden in production; security headers via Caddy; `Server` header removed; manual/resume runs as child processes (fixed a double-start race that returned 202 instead of 409); scheduler health check; health probes kept out of the audit table; uvicorn plain-text access log off |
 | 2026-10-18 | Docker deployment | `Dockerfile` (web build + Python runtime, non-root), `deploy/docker/compose.yml` (db, api, scheduler, caddy), built-in `triage scheduler` (tenant-local 02:00 plus watchdog) and an idempotent `triage bootstrap`. Image built and run in a test: API, web app, login, scheduled run and forwarded client IP all verified |

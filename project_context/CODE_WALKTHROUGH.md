@@ -51,7 +51,7 @@ backend/triage/
   model/             train.py, calibration.py, explain.py, policy.py, evaluate.py
   agent/             runner.py (the run), grounding.py (facts + validation), llm.py (writers)
   api/               main.py (routes), auth.py (login/JWT), audit.py (request audit middleware)
-  migrations/        001 schema · 002 row-level security · 003 api_requests · 004 run recovery · 005 performance
+  migrations/        001 schema · 002 row-level security · 003 api_requests · 004 run recovery · 005 performance · 006 refresh tokens
 backend/tests/       test_units.py (no DB) · test_db.py (needs loaded data)
 frontend/src/        main.tsx (routing, login, shell) · pages.tsx · components.tsx · api.ts · styles.css
 deploy/docker/       compose.yml, Caddyfile, .env.example   (production)
@@ -385,7 +385,13 @@ Replays every week of the test period. For each strategy (model, rules, revenue 
 - `login()`:
   - Throttles: 10 failures per email or 50 per IP within 15 minutes → 429.
   - Looks the user up with `system_tx` (the tenant isn't known yet).
-  - Issues an HS256 JWT with `sub`, `tenant`, `role`, `crm` (CRM user ID), `name`, `email`, `exp` (12 h).
+  - Issues an HS256 **access token** (JWT, **15 minutes**) with `sub`, `tenant`, `role`, `crm` (CRM user ID), `name`, `email`, `exp`.
+  - Issues a **refresh token**: 256 random bits, sent only as the `triage_refresh` cookie (`httpOnly`, `SameSite=Strict`, `Path=/api/auth`, `Secure` in production). Only its sha256 is stored in `refresh_tokens`. Lifetime 12 hours (one sign-in).
+- `refresh()`:
+  - Looks up the cookie's hash and re-reads the user, so a deleted user or a role change applies at the next refresh.
+  - Issues a new access token and **rotates** the refresh token (the old row gets `revoked_at` and `replaced_by`).
+  - **Reuse of a rotated token = theft:** the whole sign-in (`family_id`) is revoked.
+- `logout()`: revokes the whole sign-in.
 - `current_user()`: decodes the token → `User`. **The tenant always comes from the token, never from the request.**
 - `seed_users()`: creates one manager per company plus one login per CRM user (CSM). Idempotent.
 
@@ -395,7 +401,9 @@ Replays every week of the test period. For each strategy (model, rules, revenue 
 |---|---|---|
 | `GET /api/health` | public | DB ok, active model, last run and last success per company, stuck runs |
 | `GET /api/auth/config` | public | Whether to hint the demo password (never in production) |
-| `POST /api/auth/login` | public | → `{token, user}` |
+| `POST /api/auth/login` | public | → `{token, expires_in, user}` + refresh cookie |
+| `POST /api/auth/refresh` | refresh cookie | New access token; rotates the cookie (401 + cookie cleared if invalid, expired or reused) |
+| `POST /api/auth/logout` | refresh cookie | Revokes the sign-in, clears the cookie |
 | `GET /api/me` | any | User, company and (managers only) the CSM list |
 | `GET /api/calllist?owner=&run_id=` | any | Latest run's scores. CSMs are forced to their own book (`_owner_scope`). Returns tallies, Red/Amber/Grey lists, 12-week history and draft status |
 | `GET /api/team` | manager | Per-CSM counts and drafts approved/pending |
@@ -455,6 +463,7 @@ A background thread batch-inserts the queued rows into `api_requests`; `/api/hea
 | Identity | `identity_links` (source, external_id → account_id, method, confidence, evidence) |
 | Decisions | `models`, `agent_runs`, `feature_snapshots`, `account_scores`, `briefs`, `outreach_drafts` |
 | Audit | `audit_log` (user actions), `api_requests` (every API call) |
+| Sessions | `refresh_tokens` (hash only, `family_id` per sign-in, `revoked_at`, `replaced_by`) |
 
 The migrations in order:
 - **002** enables and **forces** row-level security on every company table, with a `tenant_isolation` policy (`tenant_id = current_setting('app.tenant_id', true)`) for `triage_app`, plus `owner_all` for the owner role.
@@ -467,7 +476,8 @@ The migrations in order:
 
 - `api.ts`:
   - `api(path)` wraps `fetch('/api' + path)` with the bearer token from `localStorage` (`triage.token`).
-  - On a 401 it clears the token and goes to `/login`.
+  - On a 401 it calls `/auth/refresh` **once** (single-flight: parallel 401s share one refresh), saves the new token and retries the call. If the refresh fails → `/login`.
+  - `signOut()` calls `/auth/logout`, then clears the token.
   - Formatters live here too.
 - `main.tsx`:
   - Routes: `/login`, `/`, `/team`, `/accounts/:id`, `/runs`, `/model`, `/data`.
@@ -493,6 +503,7 @@ The migrations in order:
 
 | Symptom | Where to look | Likely cause / fix |
 |---|---|---|
+| Signed out unexpectedly | `refresh_tokens` for the user (`revoked_at`); API logs for "refresh token reuse detected" | 12-hour session ended, signed out elsewhere, or a reused (stolen or duplicated) refresh cookie revoked the sign-in |
 | Login 401 | `users` table; is the password the one from `bootstrap`? | Wrong password, or `seed-users` never ran |
 | Login 429 | `auth._failures` (in memory) | Throttled; wait 15 minutes or `docker compose restart api` |
 | API won't start: "refusing to start in production" | `.env` | Weak `TRIAGE_JWT_SECRET` or default DB password |
@@ -546,7 +557,7 @@ python -m pytest -q                                      # 24 tests (DB tests ne
 
 1. Open `https://<host>/api/docs` (locally: `http://localhost:8000/api/docs`).
 2. **POST /api/auth/login** → *Try it out* → enter an email and password → *Execute* → copy the `token`.
-3. Click **Authorize** (top right), paste the token, then **Authorize**.
+3. Click **Authorize** (top right), paste the token, then **Authorize**. The token lasts **15 minutes**; after that, log in again (or call `POST /api/auth/refresh` from the browser, which sends the cookie).
 4. Call any route: `/api/calllist`, `/api/accounts/{id}`, `/api/runs`…
 
 **Postman:** you don't need a hand-made collection. In Postman: *Import* → *Link* → `https://<host>/api/openapi.json`. It creates the collection from the live schema, so it can't drift from the code. Then set a collection-level Bearer token.

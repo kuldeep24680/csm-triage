@@ -24,14 +24,16 @@ from ..db import system_tx, tenant_tx
 from ..features.build import FEATURES
 from ..observability import setup as setup_telemetry
 from .audit import audit_middleware, start_writer, stop_writer
-from .auth import User, current_user, login
+from .auth import REFRESH_COOKIE, User, current_user, login, logout, refresh
 
 setup_telemetry("triage-api")
 log = logging.getLogger("triage.api")
 
 TAGS = [
-    {"name": "auth", "description": "Sign in. Returns a JWT; send it as `Authorization: Bearer <token>`. "
-                                     "Use the **Authorize** button above with a token from `POST /api/auth/login`."},
+    {"name": "auth", "description": "Sign in. Returns a JWT valid for 15 minutes; send it as "
+                                     "`Authorization: Bearer <token>`. Use the **Authorize** button above with a "
+                                     "token from `POST /api/auth/login`. `POST /api/auth/refresh` returns a new one "
+                                     "using the httpOnly refresh cookie set at sign-in."},
     {"name": "call list", "description": "The weekly ranked call list for a CSM (or the whole team for a manager)."},
     {"name": "accounts", "description": "Account detail, score drivers, brief, draft, timeline and the raw "
                                         "evidence behind every feature value."},
@@ -126,9 +128,36 @@ def auth_config():
     return {"demo_password": None if settings.env == "production" else "triage-demo"}
 
 
-@app.post("/api/auth/login", tags=["auth"], summary="Sign in and get a bearer token")
+def _with_session(out: dict) -> JSONResponse:
+    """Access token in the body; refresh token only in an httpOnly cookie (JavaScript can't read it)."""
+    raw = out.pop("refresh_token")
+    resp = JSONResponse(out)
+    resp.set_cookie(REFRESH_COOKIE, raw, max_age=settings.refresh_token_ttl_hours * 3600,
+                    httponly=True, secure=settings.env == "production", samesite="strict", path="/api/auth")
+    return resp
+
+
+@app.post("/api/auth/login", tags=["auth"], summary="Sign in: 15-minute bearer token + refresh cookie")
 def api_login(body: LoginIn, request: Request):
-    return login(body.email, body.password, request.client.host if request.client else None)
+    return _with_session(login(body.email, body.password, request.client.host if request.client else None))
+
+
+@app.post("/api/auth/refresh", tags=["auth"], summary="New bearer token from the refresh cookie (rotates it)")
+def api_refresh(request: Request):
+    try:
+        return _with_session(refresh(request.cookies.get(REFRESH_COOKIE)))
+    except HTTPException as e:
+        resp = JSONResponse({"detail": e.detail}, status_code=e.status_code)
+        resp.delete_cookie(REFRESH_COOKIE, path="/api/auth")
+        return resp
+
+
+@app.post("/api/auth/logout", tags=["auth"], summary="Sign out: revoke this sign-in's refresh tokens")
+def api_logout(request: Request):
+    logout(request.cookies.get(REFRESH_COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(REFRESH_COOKIE, path="/api/auth")
+    return resp
 
 
 @app.get("/api/health", tags=["observability"], summary="Liveness: database, active model, last run per tenant")

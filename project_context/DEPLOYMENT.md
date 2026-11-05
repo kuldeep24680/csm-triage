@@ -289,6 +289,7 @@ Containers restart automatically (`restart: unless-stopped`), including after a 
 |---|---|
 | Refuses weak secrets | With `TRIAGE_ENV=production`, the api won't start if `TRIAGE_JWT_SECRET` is shorter than 32 characters or still a placeholder, or if the DB password is the development default |
 | Sign-in throttling | 10 failed sign-ins for one email, or 50 from one IP, within 15 minutes → `429` for 15 minutes |
+| Short sessions | Access tokens last 15 minutes and are renewed with a rotating, revocable refresh token in an `httpOnly`, `Secure`, `SameSite=Strict` cookie (12-hour sign-in). Reusing an old refresh token revokes the sign-in |
 | No demo password in production | The sign-in page and Swagger don't show `triage-demo`; demo buttons only fill the email |
 | Security headers | HSTS, `nosniff`, `X-Frame-Options: DENY`, referrer and permissions policy; `Server` header removed |
 | Not exposed | Postgres and the API port are reachable only inside Docker; only Caddy publishes 80/443 |

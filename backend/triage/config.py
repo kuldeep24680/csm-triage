@@ -13,7 +13,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://triage:triage@localhost:5432/triage"
     data_dir: Path = REPO_ROOT / "data"
     jwt_secret: str = "dev-only-change-me-not-for-production-use"   # = DEFAULT_JWT_SECRET
-    jwt_ttl_hours: int = 12
+    access_token_ttl_minutes: int = 15      # bearer JWT; renewed silently with the refresh cookie
+    refresh_token_ttl_hours: int = 12       # sign-in session length (one working day)
 
     # The synthetic world ends "today". Fixed so runs are reproducible.
     sim_end_date: date = date(2026, 10, 16)

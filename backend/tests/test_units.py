@@ -99,7 +99,8 @@ def test_audit_redacts_sensitive_headers():
 def test_json_logs_carry_trace_and_user_context():
     import json as _json
     import logging
-    from triage.observability import _ContextFilter, _JsonFormatter, tracer, user_name_var
+    from triage.observability import _ContextFilter, _JsonFormatter, setup, tracer, user_name_var
+    setup("test")   # a real tracer provider; without it spans are no-ops and carry no trace_id
     rec = logging.LogRecord("t", logging.INFO, __file__, 1, "hello", None, None)
     tok = user_name_var.set("Chloe Murphy")
     with tracer.start_as_current_span("x"):
